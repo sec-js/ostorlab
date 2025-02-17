@@ -11,6 +11,7 @@ Typical usage:
     status_agent.start()
 ```
 """
+
 import logging
 from threading import Thread
 from typing import Optional, Callable, List
@@ -59,7 +60,7 @@ class HealthcheckWebThread(Thread):
         self._server.serve_forever()
 
     def start(self) -> None:
-        """Start thread in deamon mode.
+        """Start thread in daemon mode.
 
         Returns:
             None

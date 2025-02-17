@@ -1,0 +1,6 @@
+mypy
+types-psutil
+types-click
+types-protobuf
+types-redis
+typing_extensions

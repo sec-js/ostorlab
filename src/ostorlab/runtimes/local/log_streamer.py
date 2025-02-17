@@ -1,4 +1,5 @@
 """Stream logs of a service from a thread."""
+
 import threading
 from typing import Generator
 
@@ -39,19 +40,21 @@ class LogStream:
     def __init__(self):
         self._threads = []
         self._color_map = {}
+        self.services = []
 
     def stream(self, service: docker.models.services.Service) -> None:
         """Stream logs of a service without blocking.
 
-        Implementation spawns a dedicated deamon thread.
+        Implementation spawns a dedicated daemon thread.
 
         Args:
             service: Docker service.
         """
         color = self._select_color(service)
         logs = service.logs(details=False, follow=True, stdout=True, stderr=True)
+        self.services.append(service.id)
         t = threading.Thread(
-            target=_stream_log, args=(logs, service.name, color), daemon=False
+            target=_stream_log, args=(logs, service.name, color), daemon=True
         )
         self._threads.append(t)
         t.start()

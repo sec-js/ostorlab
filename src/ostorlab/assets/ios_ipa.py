@@ -1,4 +1,5 @@
 """iOS .IPA asset."""
+
 import dataclasses
 from typing import Optional
 
@@ -10,15 +11,9 @@ from ostorlab.assets import asset
 class IOSIpa(asset.Asset):
     """IOS .IPA target asset."""
 
-    def __init__(
-        self,
-        content: Optional[bytes] = None,
-        path: Optional[str] = None,
-        content_url: Optional[str] = None,
-    ):
-        self.content = content
-        self.path = path
-        self.content_url = content_url
+    content: Optional[bytes] = None
+    path: Optional[str] = None
+    content_url: Optional[str] = None
 
     def __str__(self) -> str:
         str_representation = "iOS"

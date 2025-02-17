@@ -11,6 +11,7 @@ Typical usage:
     is_new = not status_agent.set_is_member()
 ```
 """
+
 import ipaddress
 import logging
 from typing import Dict, Set, Callable, Optional, Union
@@ -62,7 +63,7 @@ class AgentPersistMixin:
         Returns:
             True if it is a member, False otherwise.
         """
-        return self._redis_client.sismember(key, value)
+        return self._redis_client.sismember(key, value) == 1
 
     def set_len(self, key: Union[bytes, str]) -> int:
         """Helper function that returns the set cardinality (number of elements) of the set stored at key.
@@ -112,17 +113,29 @@ class AgentPersistMixin:
         """
         return self._redis_client.get(key)
 
+    def exists(self, key: Union[bytes, str]) -> bool:
+        """Helper function that checks if a given key exists in the Redis database.
+
+        Args:
+            key: The key to check for existence.
+
+        Returns:
+            bool: True if the key exists, False otherwise.
+        """
+
+        return self._redis_client.exists(key) == 1
+
     def hash_add(
         self,
         hash_name: Union[bytes, str],
         mapping: Dict[Union[bytes, str], Union[bytes, str]],
     ) -> bool:
         """Set mapping within hash hash_name. If hash_name does not exist a new hash is created.
-        If key exists, value is overriden.
+        If key exists, value is overridden.
 
         Args:
             hash_name: Name of the hash.
-            mapping: Dict of key/value pairs that will be hadded to hash_name
+            mapping: Dict of key/value pairs that will be added to hash_name
 
         Returns:
             True if the key does not exist, False otherwise
@@ -225,3 +238,39 @@ class AgentPersistMixin:
         else:
             member_value = ip_range.exploded
         return self.set_add(key, member_value)
+
+    def ip_network_exists(
+        self,
+        key: Union[bytes, str],
+        ip_range: Union[ipaddress.IPv6Network, ipaddress.IPv4Network],
+        value: Optional[
+            Callable[
+                [Union[ipaddress.IPv6Network, ipaddress.IPv4Network]], Union[bytes, str]
+            ]
+        ] = None,
+    ) -> bool:
+        """
+        Returns False if a network have never been persisted before, else it returns True.
+
+        this method takes
+        Args:
+            key: key for the set
+            ip_range: IPv4Network or IPv4Network network to check
+            value: Callable to format the IP network. This is helpful to add extra data to the range, like for instance
+             the port or service in case many needs to be tested separately.
+
+        Returns:
+            returns False if network is never been persisted (diff to add_ip_network shouldn't add it)
+            and True if the network or one of it's super nets already exits.
+        """
+        ip_network = ip_range
+        while ip_network.prefixlen != 0:
+            if value is not None:
+                member_value = value(ip_network)
+            else:
+                member_value = ip_network.exploded
+            if self.set_is_member(key, member_value) is True:
+                return True
+            ip_network = ip_network.supernet()
+
+        return False

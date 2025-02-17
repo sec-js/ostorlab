@@ -1,6 +1,6 @@
 """MQ Mixin.
 
-Defintion of the main methods to publish and consume MQ messages by the agents.
+Definition of the main methods to publish and consume MQ messages by the agents.
 """
 
 import asyncio
@@ -9,8 +9,12 @@ import logging
 from typing import List, Optional
 
 import aio_pika
+import tenacity
+from aiormq import exceptions as aiormq_exceptions
 
 logger = logging.getLogger(__name__)
+NUMBER_RETRIES = 6
+WAIT_FIXED_TIME = 5
 
 
 class AgentMQMixin:
@@ -43,22 +47,26 @@ class AgentMQMixin:
         self._max_priority = max_priority
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
         self._queue: Optional[aio_pika.Queue] = None
-        self._connection_pool: aio_pika.pool.Pool[
-            aio_pika.Connection
-        ] = aio_pika.pool.Pool(self._get_connection, max_size=32, loop=self._loop)
+        self._connection_pool: aio_pika.pool.Pool[aio_pika.Connection] = (
+            aio_pika.pool.Pool(self._get_connection, max_size=32, loop=self._loop)
+        )
         self._channel_pool: aio_pika.pool.Pool[aio_pika.Channel] = aio_pika.pool.Pool(
             self._get_channel, max_size=64, loop=self._loop
         )
 
-    async def _get_connection(self) -> aio_pika.Connection:
-        return await aio_pika.connect_robust(url=self._url, loop=self._loop)
+    async def _get_connection(self) -> aio_pika.abc.AbstractRobustConnection:
+        return await aio_pika.connect_robust(
+            url=self._url, loop=self._loop, fail_fast=False
+        )
 
     async def _get_channel(self) -> aio_pika.Channel:
         async with self._connection_pool.acquire() as connection:
             channel: aio_pika.Channel = await connection.channel()
             return channel
 
-    async def _get_exchange(self, channel: aio_pika.Channel) -> aio_pika.Exchange:
+    async def _get_exchange(
+        self, channel: aio_pika.abc.AbstractChannel
+    ) -> aio_pika.abc.AbstractExchange:
         return await channel.declare_exchange(
             self._topic,
             type=aio_pika.ExchangeType.TOPIC,
@@ -91,10 +99,12 @@ class AgentMQMixin:
         await self._queue.consume(self._mq_process_message, no_ack=False)
 
     async def _declare_mq_queue(
-        self, channel: aio_pika.Channel, delete_queue_first: bool = False
+        self,
+        channel: aio_pika.abc.AbstractRobustChannel,
+        delete_queue_first: bool = False,
     ) -> None:
         """Declare the MQ queue on a given channel.
-        The queue is durable, re-declaring the queue will return the same queue
+        The queue is durable, redeclaring the queue will return the same queue
         Args:
             channel: the MQ channel to use for the queues
             delete_queue_first: Used for testing purposes. To delete pending queues first.
@@ -122,13 +132,22 @@ class AgentMQMixin:
         for k in self._keys:
             await self._queue.bind(exchange, k)
 
-    async def _mq_process_message(self, message: aio_pika.IncomingMessage) -> None:
+    async def _mq_process_message(
+        self, message: aio_pika.abc.AbstractIncomingMessage
+    ) -> None:
         """Consumes the MQ messages and calls the process message callback."""
         logger.debug("incoming pika message received")
-        async with message.process(requeue=True, reject_on_redelivered=True):
-            await self._loop.run_in_executor(
-                self._executor, self.process_message, message.routing_key, message.body
-            )
+        try:
+            async with message.process(requeue=True, reject_on_redelivered=True):
+                await self._loop.run_in_executor(
+                    self._executor,
+                    self.process_message,
+                    message.routing_key,
+                    message.body,
+                )
+        except aio_pika.exceptions.ChannelInvalidStateError:
+            logger.warning("The channel is closed unexpectedly.")
+            await self.mq_run()
 
     def process_message(self, selector: str, message: bytes) -> None:
         """Callback to implement to process the MQ messages received."""
@@ -147,25 +166,49 @@ class AgentMQMixin:
         async with self._channel_pool.acquire() as channel:
             exchange = await self._get_exchange(channel)
             pika_message = aio_pika.Message(
-                body=message, priority=message_priority or 0
+                body=message,
+                priority=message_priority or 0,
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             )
             await exchange.publish(routing_key=key, message=pika_message)
 
+    @tenacity.retry(
+        retry=tenacity.retry_if_exception_type(
+            (
+                aio_pika.exceptions.ConnectionClosed,
+                ConnectionResetError,
+                concurrent.futures.CancelledError,
+                aiormq_exceptions.ChannelInvalidStateError,
+                aiormq_exceptions.AMQPConnectionError,
+            )
+        ),
+        stop=tenacity.stop_after_attempt(NUMBER_RETRIES),
+        wait=tenacity.wait_fixed(WAIT_FIXED_TIME),
+        reraise=True,
+    )
     def mq_send_message(
         self, key: str, message: bytes, message_priority: Optional[int] = None
     ) -> None:
-        """the method sends the message to the selected key with the defined priority in async mode .
+        """The method sends the message to the selected key with the defined priority in async mode .
         Args:
-            keys: Selectors that the queue listens to.
-            message: Message to send .
+            key: Selector that the queue listens to.
+            message: Message to send.
             message_priority: the priority to use for the message default is 0.
         """
         logger.debug("sending %s to %s", message, key)
+
         if not self._loop.is_running():
             self._loop.run_until_complete(
                 self.async_mq_send_message(key, message, message_priority)
             )
         else:
-            self._loop.create_task(
-                self.async_mq_send_message(key, message, message_priority)
+            future = asyncio.run_coroutine_threadsafe(
+                self.async_mq_send_message(key, message, message_priority), self._loop
             )
+            try:
+                result = future.result()
+            except Exception as exc:
+                logger.warning("The coroutine raised an exception: %s", exc)
+                raise
+            else:
+                logger.debug("The coroutine returned: %s", result)

@@ -1,10 +1,11 @@
 """RabbitMQ service in charge of routing Agent messages."""
-import hashlib
+
 import binascii
+import hashlib
 import logging
 import os
-import uuid
 import pathlib
+import uuid
 from typing import Dict
 
 import docker
@@ -72,12 +73,6 @@ class LocalRabbitMQ:
         """Start local Rabbit MQ instance."""
         self._create_network()
         self._mq_service = self._start_mq()
-
-        if self._mq_service is not None and not self._is_service_healthy():
-            logger.error(
-                "MQ container for service %s is not ready", self._mq_service.id
-            )
-            return
 
     def stop(self):
         """Stop local Rabiit MQ instance."""
@@ -148,9 +143,13 @@ class LocalRabbitMQ:
             service_mode = types.services.ServiceMode("replicated", replicas=1)
             mq_advanced_configuration = self._create_mq_advanced_config()
             configs = [mq_advanced_configuration]
+            persistent_storage = docker.types.Mount(
+                target="/var/lib/rabbitmq", source=f"{self._name}_mq_data"
+            )
             return self._docker_client.services.create(
                 image=self._mq_image,
                 networks=[self._network],
+                hostname="mq",
                 name=self._mq_host,
                 env=[
                     "TASK_ID={{.Task.Slot}}",
@@ -162,6 +161,7 @@ class LocalRabbitMQ:
                 labels={"ostorlab.universe": self._name, "ostorlab.mq": ""},
                 configs=configs,
                 endpoint_spec=endpoint_spec,
+                mounts=[persistent_storage],
             )
         except docker.errors.APIError as e:
             error_message = f"MQ service could not be started. Reason: {e}."
@@ -170,12 +170,12 @@ class LocalRabbitMQ:
 
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(20),
-        wait=tenacity.wait_exponential(multiplier=1, max=12),
+        wait=tenacity.wait_fixed(0.5),
         # return last value and don't raise RetryError exception.
         retry_error_callback=lambda lv: lv.outcome,
         retry=tenacity.retry_if_result(lambda v: v is False),
     )
-    def _is_service_healthy(self) -> bool:
+    def is_service_healthy(self) -> bool:
         logger.info("checking service %s", self._mq_service.name)
         return self.is_healthy
 

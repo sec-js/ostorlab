@@ -3,20 +3,21 @@
 All agents should inherit from the agent class to access the different features, like automated message
 serialization, message receiving and sending, selector enrollment, agent health check, etc.
 
-To use it, check out documentations at https://docs.ostorlab.co/.
+To use it, check out documentations at https://oxo.ostorlab.co/docs.
 """
+
 import abc
 import argparse
 import asyncio
-import atexit
-import functools
+import base64
+import json
 import logging
 import os
 import pathlib
+import signal
 import sys
 import threading
 import uuid
-import json
 from typing import Dict, Any, Optional, Type, List
 
 from ostorlab import exceptions
@@ -26,6 +27,9 @@ from ostorlab.agent.mixins import agent_healthcheck_mixin
 from ostorlab.agent.mixins import agent_mq_mixin
 from ostorlab.agent.mixins import agent_open_telemetry_mixin as open_telemetry_mixin
 from ostorlab.runtimes import definitions as runtime_definitions
+from ostorlab.utils import system
+
+GCP_LOGGING_CREDENTIAL_ENV = "GCP_LOGGING_CREDENTIAL"
 
 AGENT_DEFINITION_PATH = "/tmp/ostorlab.yaml"
 
@@ -38,6 +42,35 @@ class NonListedMessageSelectorError(exceptions.OstorlabError):
 
 class MaximumCyclicProcessReachedError(exceptions.OstorlabError):
     """The cyclic process limit is enforced and reach set value."""
+
+
+class MaximumDepthProcessReachedError(exceptions.OstorlabError):
+    """The processing depth limit is enforced and reached the limit."""
+
+
+def _setup_logging(agent_key: str, agent_version: str, universe: str) -> None:
+    gcp_logging_credential = os.environ.get(GCP_LOGGING_CREDENTIAL_ENV)
+    if gcp_logging_credential is not None:
+        try:
+            import google.cloud.logging
+            from google.oauth2 import service_account
+
+            info = json.loads(
+                base64.b64decode(gcp_logging_credential.encode()).decode()
+            )
+            credentials = service_account.Credentials.from_service_account_info(info)
+            client = google.cloud.logging.Client(credentials=credentials)
+            client.setup_logging(
+                labels={
+                    "agent_key": agent_key,
+                    "agent_version": agent_version,
+                    "universe": universe,
+                }
+            )
+        except ImportError:
+            logger.error(
+                "Could not import Google Cloud Logging, install it with `pip install 'ostorlab[google-cloud-logging]'"
+            )
 
 
 class AgentMixin(
@@ -65,9 +98,15 @@ class AgentMixin(
         self._agent_settings = agent_settings
         self._control_message: Optional[agent_message.Message] = None
         self.name = agent_definition.name
-        self.in_selectors = agent_definition.in_selectors
+        self.in_selectors = (
+            agent_settings.in_selectors
+            if len(agent_settings.in_selectors) > 0
+            else agent_definition.in_selectors
+        )
         self.out_selectors = agent_definition.out_selectors
         self.cyclic_processing_limit = agent_settings.cyclic_processing_limit
+        self.depth_processing_limit = agent_settings.depth_processing_limit
+        self.accepted_agents = agent_settings.accepted_agents
         # Arguments are defined in the agent definition, and can have a default value. The value can also be set from
         # the scan definition in the agent group. Therefore, we read both and override the value from the passed args.
         self.defined_args = agent_definition.args
@@ -91,6 +130,7 @@ class AgentMixin(
             host=agent_settings.healthcheck_host,
             port=agent_settings.healthcheck_port,
         )
+        signal.signal(signal.SIGTERM, self._handle_signal)
 
     @property
     def definition(self) -> agent_definitions.AgentDefinition:
@@ -111,6 +151,15 @@ class AgentMixin(
             arguments[a["name"]] = a.get("value")
         # Override the default values from settings.
         for a in self.settings.args:
+            # Enforce that only declared arguments are accepted.
+            if a.name not in arguments:
+                # TODO(OS-5119): Change behavior to fail of the argument is missing from definition.
+                logger.warning(
+                    "Argument %s is defined in the agent settings but not in the agent definition. "
+                    "Please update your definition file or the agent will fail in the future.",
+                    a.name,
+                )
+
             if a.type == "binary":
                 arguments[a.name] = a.value
             else:
@@ -133,7 +182,6 @@ class AgentMixin(
         """
         self.add_healthcheck(self.is_healthy)
         self.start_healthcheck()
-        atexit.register(functools.partial(Agent.at_exit, self))
         self._loop.run_until_complete(self.mq_init())
         logger.debug("calling start method")
         # This is call in a thread to avoid blocking calls from affecting the MQ heartbeat running on the main thread.
@@ -169,40 +217,71 @@ class AgentMixin(
         Returns:
             None
         """
+
+        self._control_message = agent_message.Message.from_raw("v3.control", message)
+        raw_message = self._control_message.data["message"]
+        # remove the UUID from the selector:
+        selector = ".".join(selector.split(".")[:-1])
+        object_message = agent_message.Message.from_raw(selector, raw_message)
+
+        # Validate the message before processing it.
         try:
-            # Keep track of the current message used later in the emit method.
-            self._control_message = agent_message.Message.from_raw(
-                "v3.control", message
-            )
-            self._validate_message()
-
-            raw_message = self._control_message.data["message"]
-
-            # remove the UUID from the selector:
-            selector = ".".join(selector.split(".")[:-1])
-            object_message = agent_message.Message.from_raw(selector, raw_message)
-            logger.debug("call to process with message=%s", raw_message)
-            self.process(object_message)
+            if self._is_valid_message() is False:
+                return None
         except MaximumCyclicProcessReachedError:
-            # This exception is not filtered.
-            self.on_max_cyclic_process_reached(message)
-        except Exception as e:  # pylint: disable="broad-except"
-            logger.exception("exception raised: %s", e)
+            self.on_max_cyclic_process_reached(object_message)
+            return None
+        except MaximumDepthProcessReachedError:
+            self.on_max_depth_process_reached(object_message)
+            return None
+
+        try:
+            logger.debug("Call to process with message= %s", raw_message)
+            self.process(object_message)
+        except Exception as e:
+            system_info = system.get_system_info()
+            if system_info is not None:
+                logger.error("System Info: %s", system_info)
+            logger.error("Message: %s", object_message)
+            logger.exception("Exception: %s", e)
         finally:
             self.process_cleanup()
             logger.debug("done call to process message")
+            # Flush all logging handlers to ensure remote logging is sent before app shutdown.
+            for h in logger.handlers:
+                h.flush()
 
-    def _validate_message(self) -> None:
+    def _is_valid_message(self) -> bool:
         """Check the message received is valid, currently only check for cyclic processing limit."""
+        control_agents: list[str] = self._control_message.data.get("control", {}).get(
+            "agents", []
+        )
         if (
             self.cyclic_processing_limit is not None
             and self.cyclic_processing_limit != 0
         ):
-            if (
-                self._control_message.data["control"]["agents"].count(self.name)
-                >= self.cyclic_processing_limit
-            ):
+            if control_agents.count(self.name) >= self.cyclic_processing_limit:
                 raise MaximumCyclicProcessReachedError()
+
+        if self.depth_processing_limit is not None and self.depth_processing_limit != 0:
+            if len(control_agents) >= self.depth_processing_limit:
+                agent_path = " -> ".join(control_agents)
+                error_message = (
+                    f"The maximum depth processing limit of {self.depth_processing_limit} agents is reached. "
+                    f"Agents path: {agent_path}"
+                )
+                raise MaximumDepthProcessReachedError(error_message)
+
+        if (
+            len(control_agents) > 0
+            and self.accepted_agents is not None
+            and len(self.accepted_agents) > 0
+        ):
+            sender_agent = control_agents[-1]
+            if sender_agent not in self.accepted_agents:
+                return False
+
+        return True
 
     @abc.abstractmethod
     def process_cleanup(self) -> None:
@@ -212,6 +291,14 @@ class AgentMixin(
             None
         """
         raise NotImplementedError()
+
+    def _handle_signal(self, *args) -> None:
+        """Call the Agent `at_exit` method responsible for executing cleanup
+        in the case of unexpected agent termination.
+        """
+        del args
+        self.at_exit()
+        sys.exit()
 
     @abc.abstractmethod
     def at_exit(self) -> None:
@@ -270,6 +357,11 @@ class AgentMixin(
         """
         raise NotImplementedError()
 
+    @abc.abstractmethod
+    def on_max_depth_process_reached(self, message: agent_message.Message) -> None:
+        """Overridable method triggered on max processing depth reached."""
+        raise NotImplementedError()
+
     def emit_raw(
         self, selector: str, raw: bytes, message_id: Optional[str] = None
     ) -> None:
@@ -285,11 +377,16 @@ class AgentMixin(
         Returns:
             None
         """
-        if selector not in self.out_selectors:
+        if (
+            any(
+                selector.startswith(out_selector) for out_selector in self.out_selectors
+            )
+            is False
+        ):
             logger.error("selector not present in list of out selectors")
             # CAUTION: this check is enforced on the client-side only in certain runtimes
             raise NonListedMessageSelectorError(
-                f'{selector} is not in {"".join(self.out_selectors)}'
+                f"{selector} is not in {''.join(self.out_selectors)}"
             )
 
         logger.debug("call to send message with %s", selector)
@@ -329,6 +426,10 @@ class AgentMixin(
         The settings file defines how the agent is running, what services are enabled and what addresses should it
         connect to. Some of these settings are consumed by the scan runtime, others are consumed by the agent itself.
 
+        Remote Logging:
+            If "GCP_LOGGING_CREDENTIAL" is present in the env variables, the Agent will use it to enable
+            remote logging to a GCP project.
+
         Args:
             args: Arguments passed to the argument parser. These are added for testability.
 
@@ -361,13 +462,21 @@ class AgentMixin(
             logger.error("settings file does not exist")
             sys.exit(2)
 
-        with open(AGENT_DEFINITION_PATH, "r", encoding="utf-8") as f_definition, open(
-            parsed_args.settings, "rb"
-        ) as f_settings:
+        with (
+            open(AGENT_DEFINITION_PATH, "r", encoding="utf-8") as f_definition,
+            open(parsed_args.settings, "rb") as f_settings,
+        ):
             agent_definition = agent_definitions.AgentDefinition.from_yaml(f_definition)
             agent_settings = runtime_definitions.AgentSettings.from_proto(
                 f_settings.read()
             )
+
+            _setup_logging(
+                agent_key=agent_settings.key,
+                agent_version=agent_definition.version or "latest",
+                universe=os.environ.get("UNIVERSE"),
+            )
+
             instance = cls(
                 agent_definition=agent_definition, agent_settings=agent_settings
             )
@@ -397,7 +506,7 @@ class Agent(open_telemetry_mixin.OpenTelemetryMixin, AgentMixin):
     stops. The function is not called when the program is killed by a signal not handled by Python, when a Python fatal
     internal error is detected, or when `os._exit()` is called.
 
-    For example and more details on how to implement an agent, refer to https://docs.ostorlab.co.
+    For example and more details on how to implement an agent, refer to https://oxo.ostorlab.co/tutorials/write_an_agent.
     """
 
     def is_healthy(self) -> bool:
@@ -449,4 +558,8 @@ class Agent(open_telemetry_mixin.OpenTelemetryMixin, AgentMixin):
         Returns:
             None
         """
+        pass
+
+    def on_max_depth_process_reached(self, message: agent_message.Message) -> None:
+        """Overridable method triggered on max processing depth reached."""
         pass

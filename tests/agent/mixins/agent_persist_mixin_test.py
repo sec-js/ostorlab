@@ -1,7 +1,11 @@
 """Tests for AgentPersistMixin module."""
+
 import ipaddress
+from typing import Generator
 
 import pytest
+from pytest_mock import plugin
+from ostorlab.runtimes.local.services import redis as local_redis_service
 
 from ostorlab.agent.mixins import agent_persist_mixin
 from ostorlab.runtimes import definitions as runtime_definitions
@@ -11,10 +15,10 @@ from ostorlab.runtimes import definitions as runtime_definitions
 @pytest.mark.asyncio
 @pytest.mark.docker
 async def testAgentPersistMixin_whenSetIsAdded_setIsPersisted(
-    mocker, redis_service, clean_redis_data
+    redis_service, clean_redis_data
 ):
     """Test proper storage and access of set API."""
-    del mocker, redis_service, clean_redis_data
+    del redis_service, clean_redis_data
     settings = runtime_definitions.AgentSettings(
         key="agent/ostorlab/debug", redis_url="redis://localhost:6379"
     )
@@ -34,6 +38,25 @@ async def testAgentPersistMixin_whenSetIsAdded_setIsPersisted(
     assert mixin.value_type("test") == "set"
     assert mixin.value_type("myKey") == "string"
     assert mixin.value_type("myKey1") == "none"
+
+
+@pytest.mark.parametrize("clean_redis_data", ["redis://localhost:6379"], indirect=True)
+@pytest.mark.asyncio
+@pytest.mark.docker
+async def testAgentPersistMixinExists_whenKeyExists_returnTrue(
+    redis_service: Generator[None, None, None],
+    clean_redis_data: Generator[local_redis_service.LocalRedis, None, None],
+) -> None:
+    """Test AgentPersistMixin exists method."""
+    settings = runtime_definitions.AgentSettings(
+        key="agent/ostorlab/debug", redis_url="redis://localhost:6379"
+    )
+    mixin = agent_persist_mixin.AgentPersistMixin(settings)
+
+    key = "thekey"
+    assert mixin.exists(key) is False
+    mixin.add(key, b"the_value")
+    assert mixin.exists(key) is True
 
 
 @pytest.mark.parametrize("clean_redis_data", ["redis://localhost:6379"], indirect=True)
@@ -165,4 +188,37 @@ async def testAgentPersistMixinCheckIpRangeExist_withCallableKey_returnTrue(
             "test_ip", ipaddress.ip_network("10.10.10.0/28"), lambda net: f"X_{net}_Y"
         )
         is False
+    )
+
+
+@pytest.mark.parametrize("clean_redis_data", ["redis://localhost:6379"], indirect=True)
+@pytest.mark.asyncio
+@pytest.mark.docker
+async def testAgentPersistMixinCheckIpNetworkExist_whenIpRangeIsCovered_returnTrue(
+    mocker: plugin.MockerFixture,
+    redis_service: local_redis_service.LocalRedis,
+    clean_redis_data,
+):
+    """Test mixin.ip_network_exist returns True if ip_range is added and False if the ip_range
+    or one of his supersets already exits"""
+    del mocker, redis_service, clean_redis_data
+    settings = runtime_definitions.AgentSettings(
+        key="agent/ostorlab/debug", redis_url="redis://localhost:6379"
+    )
+    mixin = agent_persist_mixin.AgentPersistMixin(settings)
+
+    assert (
+        mixin.ip_network_exists(
+            "test_ip", ipaddress.ip_network("8.8.8.0/23"), lambda net: f"X_{net}_Y"
+        )
+        is False
+    )
+    mixin.add_ip_network(
+        "test_ip", ipaddress.ip_network("8.8.8.0/23"), lambda net: f"X_{net}_Y"
+    )
+    assert (
+        mixin.ip_network_exists(
+            "test_ip", ipaddress.ip_network("8.8.8.0/23"), lambda net: f"X_{net}_Y"
+        )
+        is True
     )

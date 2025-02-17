@@ -1,16 +1,17 @@
 """Handles all authenticated API calls and behind the scenes operations such as authentication, validation, etc.
 
-    Typical usage example:
+Typical usage example:
 
-    authenticated_runner = AuthenticatedAPIRunner(username, password, token_duration)
-    authenticated_runner.authenticate()
+authenticated_runner = AuthenticatedAPIRunner(username, password, token_duration)
+authenticated_runner.authenticate()
 """
+
 import datetime
 import logging
 from typing import Dict, Optional, Any
 
 import click
-import requests
+import httpx
 import ubjson
 import json
 
@@ -21,6 +22,7 @@ from ostorlab.apis.runners import runner
 from ostorlab.cli import console as cli_console
 
 AUTHENTICATED_GRAPHQL_ENDPOINT = "https://api.ostorlab.co/apis/graphql"
+
 
 logger = logging.getLogger(__name__)
 console = cli_console.Console()
@@ -148,7 +150,7 @@ class AuthenticatedAPIRunner(runner.APIRunner):
                 "Response status code is %s: %s", response.status_code, response.content
             )
             raise runner.ResponseError(
-                f'Response status code is {response.status_code}: {response.content.decode(errors="ignore")}'
+                f"Response status code is {response.status_code}: {response.content.decode(errors='ignore')}"
             )
         data: Dict[str, Any] = response.json()
         errors = data.get("errors")
@@ -160,22 +162,16 @@ class AuthenticatedAPIRunner(runner.APIRunner):
 
     def _sent_request(
         self, request: api_request.APIRequest, headers: Optional[Dict[str, str]] = None
-    ) -> requests.Response:
+    ) -> httpx.Response:
         """Sends an API request."""
-        if self._proxy is not None:
-            proxy = {"https": self._proxy}
-        else:
-            proxy = None
-
-        return requests.post(
-            self.endpoint,
-            data=request.data,
-            files=request.files,
-            headers=headers,
-            proxies=proxy,
-            verify=self._verify,
-            timeout=runner.REQUEST_TIMEOUT,
-        )
+        with httpx.Client(proxy=self._proxy, verify=self._verify) as client:
+            return client.post(
+                self.endpoint,
+                data=request.data,
+                files=request.files,
+                headers=headers,
+                timeout=runner.REQUEST_TIMEOUT,
+            )
 
     def execute_ubjson_request(self, request: api_request.APIRequest) -> Dict[str, Any]:
         """Executes a request using the Authenticated GraphQL API.
@@ -206,7 +202,7 @@ class AuthenticatedAPIRunner(runner.APIRunner):
                 "Response status code is %s: %s", response.status_code, response.content
             )
             raise runner.ResponseError(
-                f'Response status code is {response.status_code}: {response.content.decode(errors="ignore")}'
+                f"Response status code is {response.status_code}: {response.content.decode(errors='ignore')}"
             )
         data: Dict[str, Any] = json.loads(response.content.decode())
         errors = data.get("errors")
@@ -218,19 +214,13 @@ class AuthenticatedAPIRunner(runner.APIRunner):
 
     def _send_ubjson_request(
         self, request: api_request.APIRequest, headers: Optional[Dict[str, str]] = None
-    ) -> requests.Response:
+    ) -> httpx.Response:
         """Sends an API request."""
-        if self._proxy is not None:
-            proxy = {"https": self._proxy}
-        else:
-            proxy = None
-
-        return requests.post(
-            self.endpoint,
-            data=ubjson.dumpb(request.data),
-            files=request.files,
-            headers=headers,
-            proxies=proxy,
-            verify=self._verify,
-            timeout=runner.REQUEST_TIMEOUT,
-        )
+        with httpx.Client(proxy=self._proxy, verify=self._verify) as client:
+            return client.post(
+                self.endpoint,
+                data=ubjson.dumpb(request.data),
+                files=request.files,
+                headers=headers,
+                timeout=runner.REQUEST_TIMEOUT,
+            )

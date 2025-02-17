@@ -3,6 +3,7 @@
 The mixin overrides the behaviour of the main methods of the agent, mainly emit and process to send traces,
 metadata, metrics and exceptions.
 """
+
 import base64
 import io
 import json
@@ -64,7 +65,7 @@ class TraceExporter:
 
     def _get_file_exporter(self, parsed_url):
         file_path = parsed_url.path
-        self._file = open(file_path, "w", encoding="utf-8")  # pylint: disable=R1732
+        self._file = open(file_path, "w", encoding="utf-8")
         file_exporter = sdk_export.ConsoleSpanExporter(out=self._file)
         logger.info("Configuring file exporter..")
         return file_exporter
@@ -96,9 +97,9 @@ class TraceExporter:
             )
             service_account_key_temp_file.write(service_account_json_content)
             # the env variable GOOGLE_APPLICATION_CREDENTIALS points to a file defining the service account credentials
-            os.environ[
-                "GOOGLE_APPLICATION_CREDENTIALS"
-            ] = service_account_key_temp_file.name
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = (
+                service_account_key_temp_file.name
+            )
         return cloud_trace.CloudTraceSpanExporter(project_id=project_id)
 
 
@@ -241,7 +242,7 @@ class OpenTelemetryMixin:
     def emit(
         self, selector: str, data: Dict[str, Any], message_id: Optional[str] = None
     ) -> None:
-        """Overriden emit method of the agent to add OpenTelemetry traces.
+        """Overridden emit method of the agent to add OpenTelemetry traces.
         Sends a message to all listening agents on the specified selector.
 
         Args:

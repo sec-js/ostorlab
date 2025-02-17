@@ -1,4 +1,5 @@
 """Tests for vulnz describe command."""
+
 from click.testing import CliRunner
 
 from ostorlab.apis.runners import authenticated_runner
@@ -9,7 +10,7 @@ from ostorlab.runtimes.local.models import models
 def testOstorlabVulnzDescribeCLI_whenCorrectCommandsAndOptionsProvided_showsVulnzInfo(
     mocker, db_engine_path
 ):
-    """Test ostorlab vulnz describe command with correct commands and options.
+    """Test oxo vulnz describe command with correct commands and options.
     Should show vulnz details.
     """
     runner = CliRunner()
@@ -17,8 +18,7 @@ def testOstorlabVulnzDescribeCLI_whenCorrectCommandsAndOptionsProvided_showsVuln
     create_scan_db = models.Scan.create("test")
     vuln_db = models.Vulnerability.create(
         title="Secure TLS certificate validation",
-        short_description="Application performs proper server certificate "
-        "validation",
+        short_description="Application performs proper server certificate validation",
         description="The application performs proper TLS certificate validation.",
         recommendation="The implementation is secure, no recommendation apply.",
         technical_detail="TLS certificate validation was tested dynamically by "
@@ -34,6 +34,7 @@ def testOstorlabVulnzDescribeCLI_whenCorrectCommandsAndOptionsProvided_showsVuln
             "metadata": [{"type": "CODE_LOCATION", "value": "dir/file.js:41"}],
         },
         scan_id=create_scan_db.id,
+        references=[],
     )
 
     result = runner.invoke(
@@ -48,7 +49,7 @@ def testOstorlabVulnzDescribeCLI_whenCorrectCommandsAndOptionsProvided_showsVuln
 
 
 def testOstorlabCloudRuntimeScanVulnzDescribeCLI_whenCorrectCommandsAndOptionsProvided_showsVulnzInfo(
-    requests_mock,
+    httpx_mock,
 ):
     """Test ostorlab describe command when Correct command and correct scan id should show list of vulnz."""
     mock_response = {
@@ -88,7 +89,7 @@ def testOstorlabCloudRuntimeScanVulnzDescribeCLI_whenCorrectCommandsAndOptionsPr
                                 ],
                             },
                             "vulnerabilityLocation": {
-                                "asset": {"iosApp": {"bundleId": "a.b.c"}},
+                                "asset": {"bundleId": "a.b.c"},
                                 "metadata": [
                                     {
                                         "metadataType": "FILE_PATH",
@@ -102,8 +103,9 @@ def testOstorlabCloudRuntimeScanVulnzDescribeCLI_whenCorrectCommandsAndOptionsPr
             }
         }
     }
-    requests_mock.post(
-        authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
+    httpx_mock.add_response(
+        method="POST",
+        url=authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
         json=mock_response,
         status_code=200,
     )
@@ -122,7 +124,7 @@ def testOstorlabCloudRuntimeScanVulnzDescribeCLI_whenCorrectCommandsAndOptionsPr
 
 
 def testOstorlabCloudRuntimeScanVulnzDescribeCLI_whenScanNotFound_showNotFoundError(
-    requests_mock,
+    httpx_mock,
 ):
     """Test ostorlab describe command when Correct command and scan does not exist."""
     mock_response = {
@@ -134,8 +136,9 @@ def testOstorlabCloudRuntimeScanVulnzDescribeCLI_whenScanNotFound_showNotFoundEr
             }
         ]
     }
-    requests_mock.post(
-        authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
+    httpx_mock.add_response(
+        method="POST",
+        url=authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
         json=mock_response,
         status_code=200,
     )

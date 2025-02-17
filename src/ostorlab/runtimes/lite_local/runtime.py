@@ -2,10 +2,11 @@
 
 The local runtime requires Docker Swarm to run robust long-running services with a set of configured services.
 """
+
 import logging
+from concurrent import futures
 from typing import List
 from typing import Optional
-from concurrent import futures
 
 import click
 import docker
@@ -20,12 +21,13 @@ from ostorlab.cli import install_agent
 from ostorlab.runtimes import definitions
 from ostorlab.runtimes import runtime
 from ostorlab.runtimes.lite_local import agent_runtime
+from ostorlab.runtimes.local.models import models
 from ostorlab.utils import volumes
 
 NETWORK_PREFIX = "ostorlab_lite_local_network"
 
 logger = logging.getLogger(__name__)
-console = cli_console.Console()
+console = cli_console.Console(logger=logger)
 
 ASSET_INJECTION_AGENT_DEFAULT = "agent/ostorlab/inject_asset"
 
@@ -75,6 +77,7 @@ class LiteLocalRuntime(runtime.Runtime):
         network: str,
         redis_url: str,
         tracing_collector_url: str,
+        gcp_logging_credential: Optional[str] = None,
         **kwargs,
     ) -> None:
         """Set runtime attributes.
@@ -89,6 +92,7 @@ class LiteLocalRuntime(runtime.Runtime):
             redis_url: Redis URL.
             tracing_collector_url: Tracing Collector supporting Open Telemetry URL. The URL is a custom format to pass
              exporter and its arguments.
+            gcp_logging_credential: GCP Logging JSON credentials.
         """
         del args
         del kwargs
@@ -115,6 +119,7 @@ class LiteLocalRuntime(runtime.Runtime):
         self._network = network
         self._redis_url = redis_url
         self._tracing_collector_url = tracing_collector_url
+        self._gcp_logging_credential = gcp_logging_credential
 
         if not docker_requirements_checker.is_docker_installed():
             console.error("Docker is not installed.")
@@ -197,7 +202,7 @@ class LiteLocalRuntime(runtime.Runtime):
         except agent_runtime.MissingAgentDefinitionLabel as e:
             console.error(
                 f"Missing agent definition {e}. This is probably due to building the image directly with"
-                f" docker instead of `ostorlab agent build` command"
+                f" docker instead of `oxo agent build` command"
             )
             self.stop(self.scan_id)
 
@@ -284,13 +289,14 @@ class LiteLocalRuntime(runtime.Runtime):
             self._bus_exchange_topic,
             self._redis_url,
             self._tracing_collector_url,
+            self._gcp_logging_credential,
         )
-        agent_service = runtime_agent.create_agent_service(
-            self.network, extra_configs, extra_mounts
+        runtime_agent.create_agent_service(
+            network_name=self.network,
+            extra_configs=extra_configs,
+            extra_mounts=extra_mounts,
+            replicas=agent.replicas,
         )
-
-        if agent.replicas > 1:
-            self._scale_service(agent_service, agent.replicas)
 
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(20),
@@ -348,15 +354,6 @@ class LiteLocalRuntime(runtime.Runtime):
             ],
         )
 
-    def _scale_service(
-        self, service: docker_models_services.Service, replicas: int
-    ) -> None:
-        """Calling scale directly on the service causes an API error. This is a workaround that simulates refreshing
-        the service object, then calling the scale API."""
-        for s in self._docker_client.services.list():
-            if s.name == service.name:
-                s.scale(replicas)
-
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(20),
         wait=tenacity.wait_exponential(multiplier=1, max=20),
@@ -395,5 +392,27 @@ class LiteLocalRuntime(runtime.Runtime):
         """Dump vulnerabilities to a file in a specific format.
         Returns:
         None
+        """
+        pass
+
+    def link_agent_group_scan(
+        self,
+        scan: models.Scan,
+        agent_group_definition: definitions.AgentGroupDefinition,
+    ) -> None:
+        """Link the agent group to the scan in the database.
+
+        Args:
+            scan: The scan object.
+            agent_group_definition: The agent group definition.
+        """
+        pass
+
+    def link_assets_scan(self, scan_id: int, assets: List[base_asset.Asset]) -> None:
+        """Link the assets to the scan in the database.
+
+        Args:
+            scan_id: The scan id.
+            assets: The list of assets.
         """
         pass

@@ -1,4 +1,5 @@
 """Unittest for vulnz dump command."""
+
 import csv
 import json
 import pathlib
@@ -13,7 +14,7 @@ from ostorlab.runtimes.local.models import models
 def testVulnzDump_whenOptionsAreValid_jsonOutputFileIsCreated(
     mocker, tmpdir, db_engine_path
 ):
-    """Test ostorlab vulnz dump command with correct commands and options.
+    """Test oxo vulnz dump command with correct commands and options.
     Should create a json file with the vulnerabilities.
 
     tmpdir : pytest fixture for temporary paths & files.
@@ -21,7 +22,7 @@ def testVulnzDump_whenOptionsAreValid_jsonOutputFileIsCreated(
 
     runner = CliRunner()
     mocker.patch.object(models, "ENGINE_URL", db_engine_path)
-    create_scan_db = models.Scan.create(title="test", asset="android")
+    create_scan_db = models.Scan.create(title="test")
     vuln_db = models.Vulnerability.create(
         title="MyVuln",
         short_description="Xss",
@@ -36,6 +37,7 @@ def testVulnzDump_whenOptionsAreValid_jsonOutputFileIsCreated(
             "metadata": [{"type": "CODE_LOCATION", "value": "dir/file.js:41"}],
         },
         scan_id=create_scan_db.id,
+        references=[],
     )
     models.Vulnerability.create(
         title="OtherVuln",
@@ -47,6 +49,7 @@ def testVulnzDump_whenOptionsAreValid_jsonOutputFileIsCreated(
         cvss_v3_vector="5:6:7",
         dna="121312",
         scan_id=create_scan_db.id,
+        references=[],
     )
     output_file = pathlib.Path(tmpdir) / "output.jsonl"
 
@@ -74,16 +77,16 @@ def testVulnzDump_whenOptionsAreValid_jsonOutputFileIsCreated(
     assert data[0]["risk_rating"] == "High"
     assert data[0]["cvss_v3_vector"] == "5:6:7"
     assert data[0]["title"] == "MyVuln"
-    assert "Android package name: a.b.c" in data[0]["location"]
+    assert "Android: `a.b.c`" in data[0]["location"]
     assert data[1]["id"] == 2
     assert data[1]["risk_rating"] == "High"
     assert data[1]["title"] == "OtherVuln"
 
 
 def testVulnzDumpCloudRuntime_whenOptionsAreValid_jsonOutputFileIsCreated(
-    requests_mock, tmpdir
+    httpx_mock, tmpdir
 ):
-    """Test ostorlab vulnz dump command with correct commands and options and the selected runtime is cloud.
+    """Test oxo vulnz dump command with correct commands and options and the selected runtime is cloud.
     Should create a json file with the vulnerabilities.
 
     tmpdir : pytest fixture for temporary paths & files.
@@ -114,7 +117,7 @@ def testVulnzDumpCloudRuntime_whenOptionsAreValid_jsonOutputFileIsCreated(
                                 ],
                             },
                             "vulnerabilityLocation": {
-                                "asset": {"androidApp": {"packageName": "a.b.c"}},
+                                "asset": {"packageName": "a.b.c"},
                                 "metadata": [
                                     {
                                         "metadataType": "CODE_LOCATION",
@@ -143,8 +146,9 @@ def testVulnzDumpCloudRuntime_whenOptionsAreValid_jsonOutputFileIsCreated(
         }
     }
 
-    requests_mock.post(
-        authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
+    httpx_mock.add_response(
+        method="POST",
+        url=authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
         json=list_vulnz,
         status_code=200,
     )
@@ -180,9 +184,9 @@ def testVulnzDumpCloudRuntime_whenOptionsAreValid_jsonOutputFileIsCreated(
 
 
 def testVulnzDumpCloudRuntime_whenOptionsAreValid_csvOutputFileIsCreated(
-    requests_mock, tmpdir
+    httpx_mock, tmpdir
 ):
-    """Test ostorlab vulnz dump command with correct commands and options and runtime is cloud.
+    """Test oxo vulnz dump command with correct commands and options and runtime is cloud.
     Should create a json file with the vulnerabilities.
 
     tmpdir : pytest fixture for temporary paths & files.
@@ -229,8 +233,9 @@ def testVulnzDumpCloudRuntime_whenOptionsAreValid_csvOutputFileIsCreated(
         }
     }
 
-    requests_mock.post(
-        authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
+    httpx_mock.add_response(
+        method="POST",
+        url=authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
         json=list_vulnz,
         status_code=200,
     )
@@ -279,8 +284,8 @@ def testVulnzDumpCloudRuntime_whenOptionsAreValid_csvOutputFileIsCreated(
     assert "title1: https://url1.co/page2" in data[0][-2]
 
 
-def testVulnzDumpCloudRuntime_whenScanNotfound_ShowError(requests_mock, tmpdir):
-    """Test ostorlab vulnz dump command with correct commands and wrong scan id.
+def testVulnzDumpCloudRuntime_whenScanNotfound_ShowError(httpx_mock, tmpdir):
+    """Test oxo vulnz dump command with correct commands and wrong scan id.
     Should show not found error.
 
     tmpdir : pytest fixture for temporary paths & files.
@@ -296,8 +301,9 @@ def testVulnzDumpCloudRuntime_whenScanNotfound_ShowError(requests_mock, tmpdir):
         "data": {"scan": "null"},
     }
 
-    requests_mock.post(
-        authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
+    httpx_mock.add_response(
+        method="POST",
+        url=authenticated_runner.AUTHENTICATED_GRAPHQL_ENDPOINT,
         json=list_vulnz,
         status_code=200,
     )
@@ -326,7 +332,7 @@ def testVulnzDumpCloudRuntime_whenScanNotfound_ShowError(requests_mock, tmpdir):
 def testVulnzDump_whenOptionsAreValid_csvOutputFileIsCreated(
     mocker, tmpdir, db_engine_path
 ):
-    """Test ostorlab vulnz dump command with correct commands and options.
+    """Test oxo vulnz dump command with correct commands and options.
     Should create a csv file with the vulnerabilities.
 
     tmpdir : pytest fixture for temporary paths & files.
@@ -334,7 +340,7 @@ def testVulnzDump_whenOptionsAreValid_csvOutputFileIsCreated(
 
     runner = CliRunner()
     mocker.patch.object(models, "ENGINE_URL", db_engine_path)
-    create_scan_db = models.Scan.create(title="test", asset="Android")
+    create_scan_db = models.Scan.create(title="test")
     vuln_db = models.Vulnerability.create(
         title="MyVuln",
         short_description="Xss",
@@ -390,21 +396,21 @@ def testVulnzDump_whenOptionsAreValid_csvOutputFileIsCreated(
         "technical_detail",
     ]
     assert data[0][3] == "High"
-    assert "Android package name: a.b.c" in data[0][2]
+    assert "Android: `a.b.c`" in data[0][2]
     assert "dummy title: https://dummy.co/path" in data[0][-2]
 
 
 def testVulnzDumpInOrderOfSeverity_whenOptionsAreValid_jsonOutputFileIsCreated(
     mocker, tmpdir, db_engine_path
 ):
-    """Test ostorlab vulnz dump command with correct commands and options.
+    """Test oxo vulnz dump command with correct commands and options.
     Should create a json file with the vulnerabilities, ordered by the risk severity.
 
     tmpdir : pytest fixture for temporary paths & files.
     """
     runner = CliRunner()
     mocker.patch.object(models, "ENGINE_URL", db_engine_path)
-    create_scan_db = models.Scan.create(title="test", asset="Android")
+    create_scan_db = models.Scan.create(title="test")
 
     vuln_db = models.Vulnerability.create(
         title="MyVuln",
@@ -416,6 +422,7 @@ def testVulnzDumpInOrderOfSeverity_whenOptionsAreValid_jsonOutputFileIsCreated(
         cvss_v3_vector="5:6:7",
         dna="121312",
         scan_id=create_scan_db.id,
+        references=[],
     )
 
     output_file = pathlib.Path(tmpdir) / "output.jsonl"

@@ -1,4 +1,5 @@
 """Link asset."""
+
 import dataclasses
 
 from ostorlab.assets import asset
@@ -9,9 +10,8 @@ from ostorlab.assets import asset
 class Link(asset.Asset):
     """Agent asset."""
 
-    def __init__(self, url: str, method: str):
-        self.url = url
-        self.method = method
+    url: str
+    method: str
 
     def __str__(self) -> str:
         return f"Link {self.url} with method {self.method}"

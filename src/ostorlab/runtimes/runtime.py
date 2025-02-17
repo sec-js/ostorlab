@@ -1,4 +1,5 @@
 """Runtime are in charge of running scan as defines by a set of agents, agent group and a target asset."""
+
 import abc
 import dataclasses
 from typing import List, Optional
@@ -13,15 +14,17 @@ class Scan:
     """Scan object."""
 
     id: str
-    asset: Optional[str]
     created_time: str
     progress: Optional[str]
+    asset: Optional[str] = None
+    risk_rating: Optional[str] = None
 
 
 class Runtime(abc.ABC):
     """Runtime is in charge of preparing the environment to trigger a scan."""
 
-    follow: bool
+    follow: list
+    timeout: Optional[int] = None
 
     @abc.abstractmethod
     def can_run(self, agent_group_definition: definitions.AgentGroupDefinition) -> bool:
@@ -93,5 +96,29 @@ class Runtime(abc.ABC):
         """Dump vulnerabilities to a file in a specific format.
         Returns:
         None
+        """
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def link_agent_group_scan(
+        self,
+        scan,
+        agent_group_definition: definitions.AgentGroupDefinition,
+    ) -> None:
+        """Link the agent group to the scan in the database.
+
+        Args:
+            scan: The scan object.
+            agent_group_definition: The agent group definition.
+        """
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def link_assets_scan(self, scan_id: int, assets: List[base_asset.Asset]) -> None:
+        """Link the assets to the scan in the database.
+
+        Args:
+            scan_id: The scan id.
+            assets: The list of assets.
         """
         raise NotImplementedError()

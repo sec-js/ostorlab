@@ -1,4 +1,5 @@
 """Agent class unit tests."""
+
 import datetime
 import json
 import logging
@@ -6,15 +7,20 @@ import multiprocessing as mp
 import pathlib
 import time
 import uuid
+import signal
+import sys
+import os
 
 import pytest
+from pytest_mock import plugin
 
 from ostorlab.agent import agent
 from ostorlab.agent import definitions as agent_definitions
 from ostorlab.agent.message import message as agent_message
 from ostorlab.runtimes import definitions as runtime_definitions
-from ostorlab.utils import defintions as utils_definitions
 from ostorlab.testing import agent as agent_testing
+from ostorlab.utils import definitions as utils_definitions
+from ostorlab.utils import system
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +113,7 @@ def testAgentMain_whenPassedArgsAreValid_runsAgent(mocker):
     SampleAgent.__init__.assert_called()
 
 
-def testAgentMain_whithNonExistingFile_exits(mocker):
+def testAgentMain_withNonExistingFile_exits(mocker):
     """Test agent when missing definition or settings files to ensure the command exits."""
 
     class SampleAgent(agent.Agent):
@@ -120,11 +126,11 @@ def testAgentMain_whithNonExistingFile_exits(mocker):
 
         SampleAgent.run.assert_not_called()
         SampleAgent.__init__.assert_not_called()
-        assert wrapper_exception.type == SystemExit
+        assert isinstance(wrapper_exception.type, SystemExit) is True
         assert wrapper_exception.value.code == 42
 
 
-def testAgent_withDefaultAndSettingsArgs_retunsExpectedArgs(agent_mock):
+def testAgent_withDefaultAndSettingsArgs_returnsExpectedArgs(agent_mock):
     class TestAgent(agent.Agent):
         """Test Agent"""
 
@@ -146,6 +152,40 @@ def testAgent_withDefaultAndSettingsArgs_retunsExpectedArgs(agent_mock):
                 utils_definitions.Arg(name="speed", type="binary", value=b"slow"),
                 utils_definitions.Arg(
                     name="color", type="string", value=json.dumps("red").encode()
+                ),
+            ],
+        ),
+    )
+
+    assert test_agent.args == {"color": "red", "speed": b"slow"}
+
+
+@pytest.mark.xfail(reason="OS-5119: Awaiting deprecation.")
+def testAgent_withArgMissingFromDefinition_raisesException(agent_mock):
+    class TestAgent(agent.Agent):
+        """Test Agent"""
+
+    test_agent = TestAgent(
+        agent_definitions.AgentDefinition(
+            name="start_test_agent",
+            out_selectors=["v3.healthcheck.ping"],
+            args=[
+                {"name": "color", "type": "string", "value": None},
+                {"name": "speed", "type": "string", "value": b"fast"},
+            ],
+        ),
+        runtime_definitions.AgentSettings(
+            key="agent/ostorlab/start_test_agent",
+            bus_url="amqp://guest:guest@localhost:5672/",
+            bus_exchange_topic="ostorlab_test",
+            healthcheck_port=5301,
+            args=[
+                utils_definitions.Arg(name="speed", type="binary", value=b"slow"),
+                utils_definitions.Arg(
+                    name="color", type="string", value=json.dumps("red").encode()
+                ),
+                utils_definitions.Arg(
+                    name="force", type="string", value=json.dumps("strong").encode()
                 ),
             ],
         ),
@@ -176,8 +216,8 @@ def testEmit_whenEmitFromNoProcess_willSendTheAgentNameInControlAgents(
     )
 
     technical_detail = """Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum
-    has been the standard dummy text ever since the 1500s, when an unknown printer took a galley of type and 
-    scrambled it to make a type specimen book. when an unknown printer took a galley of type and scrambled it to 
+    has been the standard dummy text ever since the 1500s, when an unknown printer took a galley of type and
+    scrambled it to make a type specimen book. when an unknown printer took a galley of type and scrambled it to
     make a type specimen book. """
     test_agent.emit(
         "v3.report.vulnerability",
@@ -219,12 +259,23 @@ def testProcessMessage_whenCyclicMaxIsSet_callbackCalled(
     test_agent = TestAgent(
         agent_definition=agent_definition, agent_settings=agent_settings
     )
-
-    message = agent_message.Message.from_data(
-        "v3.control", {"control": {"agents": ["agentY", "agentX", "agentX", "agentX"]}}
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you hear me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agentY", "agentX", "agentX", "agentX"]},
+            "message": actual_message.raw,
+        },
     )
 
-    test_agent.process_message(message.selector, message.raw)
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
 
     assert process_mock.called is True
 
@@ -259,8 +310,8 @@ def testProcessMessage_whenCyclicMaxIsSetFromDefaultProtoValue_callbackNotCalled
     )
 
     technical_detail = """Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum
-        has been the standard dummy text ever since the 1500s, when an unknown printer took a galley of type and 
-        scrambled it to make a type specimen book. when an unknown printer took a galley of type and scrambled it to 
+        has been the standard dummy text ever since the 1500s, when an unknown printer took a galley of type and
+        scrambled it to make a type specimen book. when an unknown printer took a galley of type and scrambled it to
         make a type specimen book. """
     vuln_message = agent_message.Message.from_data(
         "v3.report.vulnerability",
@@ -282,3 +333,675 @@ def testProcessMessage_whenCyclicMaxIsSetFromDefaultProtoValue_callbackNotCalled
     test_agent.process_message(f"v3.report.vulnerability.{uuid.uuid4()}", message.raw)
 
     assert process_mock.called is False
+
+
+def testProcessMessage_whenExceptionRaised_shouldLogErrorWithMessageAndSystemLoad(
+    agent_run_mock: agent_testing.AgentRunInstance,
+    mocker: plugin.MockerFixture,
+) -> None:
+    """When an exception is raised, the agent should log the exception, the message that was processed,
+    and details about the current state of the system such as cpu, ram..."""
+
+    logger_error = mocker.patch("logging.Logger.error")
+
+    class TestAgent(agent.Agent):
+        """Helper class to test OpenTelemetry mixin implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            raise ValueError("some error")
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="agentX",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings.from_proto(
+        runtime_definitions.AgentSettings(
+            key="some_key",
+        ).to_raw_proto()
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you hear me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agentY", "agentX", "agentX", "agentX"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert logger_error.call_count == 3
+    assert "System Info: %s" in logger_error.call_args_list[0][0][0]
+    assert (
+        isinstance(logger_error.call_args_list[0][0][1], system.SystemLoadInfo) is True
+    )
+    assert (
+        isinstance(logger_error.call_args_list[1][0][1], agent_message.Message) is True
+    )
+    assert logger_error.call_args_list[1][0][1].selector == "v3.healthcheck.ping"
+    assert (
+        logger_error.call_args_list[1][0][1].data["body"] == "Hello, can you hear me?"
+    )
+    assert isinstance(logger_error.call_args_list[2][0][1], ValueError) is True
+    assert "some error" in logger_error.call_args_list[2][0][1].args[0]
+
+
+def testProcessMessage_whenExceptionRaisedAndPsutilNotAvailable_shouldLogErrorWithMessageAndNoSystemLoad(
+    agent_run_mock: agent_testing.AgentRunInstance,
+    mocker: plugin.MockerFixture,
+) -> None:
+    """When trying to get system load information and psutil is not available, the agent should log the exception,"""
+
+    logger_error = mocker.patch("logging.Logger.error")
+    mocker.patch("psutil.virtual_memory", side_effect=ImportError())
+
+    class TestAgent(agent.Agent):
+        """Helper class to test OpenTelemetry mixin implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            raise ValueError("some error")
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="agentX",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings.from_proto(
+        runtime_definitions.AgentSettings(
+            key="some_key",
+        ).to_raw_proto()
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you hear me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agentY", "agentX", "agentX", "agentX"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert logger_error.call_count == 2
+    assert (
+        isinstance(logger_error.call_args_list[0][0][1], agent_message.Message) is True
+    )
+    assert logger_error.call_args_list[0][0][1].selector == "v3.healthcheck.ping"
+    assert (
+        logger_error.call_args_list[0][0][1].data["body"] == "Hello, can you hear me?"
+    )
+    assert isinstance(logger_error.call_args_list[1][0][1], ValueError) is True
+    assert "some error" in logger_error.call_args_list[1][0][1].args[0]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Does not run on windows")
+def testAgentAtExist_whenTerminationSignalIsSent_shouldInterceptSignalExecuteAtExistAndExit(
+    agent_run_mock: agent_testing.AgentRunInstance,
+    mocker: plugin.MockerFixture,
+    ping_message: agent_message.Message,
+) -> None:
+    """Ensuring the execution of the `at_exit` method in the case of unexpected agent termination."""
+    mp_event = mp.Event()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test Agent at exit implementation."""
+
+        def __init__(self, agent_definition, agent_settings, mp_event) -> None:
+            super().__init__(agent_definition, agent_settings)
+            self.mp_event = mp_event
+
+        def process(self, message: agent_message.Message) -> None:
+            del message
+            time.sleep(2000)
+
+        def at_exit(self) -> None:
+            self.mp_event.set()
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="agentX",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings.from_proto(
+        runtime_definitions.AgentSettings(
+            key="testing_agent",
+        ).to_raw_proto()
+    )
+
+    def run_agent(agent_definition, agent_settings, message, mp_event):
+        """method responsible for running the test agent inside a process."""
+        test_agent = TestAgent(
+            agent_definition=agent_definition,
+            agent_settings=agent_settings,
+            mp_event=mp_event,
+        )
+        test_agent.process(message)
+
+    agent_process = mp.Process(
+        target=run_agent,
+        args=(
+            agent_definition,
+            agent_settings,
+            ping_message,
+            mp_event,
+        ),
+        daemon=False,
+    )
+    mp_event.clear()
+    agent_process.start()
+    time.sleep(3)
+    os.kill(agent_process.pid, signal.SIGTERM)
+    agent_process.join()
+
+    assert mp_event.is_set() is True
+
+
+def testProcessMessage_whenProcessingDepthLimitIsReached_callbackCalled(
+    agent_run_mock: agent_testing.AgentRunInstance, mocker: plugin.MockerFixture
+) -> None:
+    """When processing depth limit is set and the limit is reached, the process should trigger a callback."""
+
+    on_max_depth_process_reached_mock = mocker.Mock()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test the max processing depth limit implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            pass
+
+        def on_max_depth_process_reached(self, message: agent_message.Message) -> None:
+            on_max_depth_process_reached_mock(message)
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="agentX",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="some_key",
+        depth_processing_limit=3,
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you hear me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agent1", "agent2", "agent3", "agent4"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert on_max_depth_process_reached_mock.called is True
+
+
+def testProcessMessage_whenProcessingDepthLimitIsSetAndLimitNotReached_callbackNotCalled(
+    agent_run_mock: agent_testing.AgentRunInstance, mocker: plugin.MockerFixture
+) -> None:
+    """When processing depth limit is set, the process should not trigger a callback if limit is not reached."""
+
+    on_max_depth_process_reached_mock = mocker.Mock()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test the max processing depth limit implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            pass
+
+        def on_max_depth_process_reached(self, message: agent_message.Message) -> None:
+            on_max_depth_process_reached_mock(message)
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="agentX",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="some_key",
+        depth_processing_limit=3,
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you hear me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agent1", "agent2"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert on_max_depth_process_reached_mock.called is False
+
+
+def testProcessMessage_whenProcessingDepthLimitIsSetFromDefaultProtoValue_callbackNotCalled(
+    agent_run_mock: agent_testing.AgentRunInstance, mocker: plugin.MockerFixture
+) -> None:
+    """When processing depth limit is not set, the proto default value is 0,
+    the agent behavior must not trigger a callback."""
+
+    on_max_depth_process_reached_mock = mocker.Mock()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test the max processing depth limit implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            pass
+
+        def on_max_depth_process_reached(self, message: agent_message.Message) -> None:
+            on_max_depth_process_reached_mock(message)
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="agentX",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings.from_proto(
+        runtime_definitions.AgentSettings(
+            key="some_key",
+        ).to_raw_proto()
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you hear me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agent1", "agent2", "agent3", "agent4"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.report.vulnerability.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert on_max_depth_process_reached_mock.called is False
+
+
+def testProcessMessage_whenProcessingDepthLimitIsReached_dropMessage(
+    agent_run_mock: agent_testing.AgentRunInstance, mocker: plugin.MockerFixture
+) -> None:
+    """When processing depth limit is set and the limit is reached, the message should be dropped."""
+
+    process_mock = mocker.Mock()
+    on_max_depth_process_reached_mock = mocker.Mock()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test the max processing depth limit implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            process_mock(message)
+
+        def on_max_depth_process_reached(self, message: agent_message.Message) -> None:
+            on_max_depth_process_reached_mock(message)
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="agentX",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="some_key",
+        depth_processing_limit=3,
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you hear me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agent1", "agent2", "agent3", "agent4"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert on_max_depth_process_reached_mock.called is True
+    assert process_mock.called is False
+
+
+def testProcessMessage_whenAgentIsAccepted_shouldProcessMessage(
+    agent_run_mock: agent_testing.AgentRunInstance, mocker: plugin.MockerFixture
+) -> None:
+    """When the agent is in the list of accepted agents, message should be processed."""
+
+    process_mock = mocker.Mock()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test the accepted agents implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            process_mock(message)
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="main_agent",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="agent/org/main_agent",
+        accepted_agents=["agent1", "agent2", "agent3"],
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you process me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agent4", "agent5", "agent2"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert process_mock.called is True
+
+
+def testProcessMessage_whenAgentNotAccepted_shouldNotProcessMessage(
+    agent_run_mock: agent_testing.AgentRunInstance, mocker: plugin.MockerFixture
+) -> None:
+    """When the agent is not in the list of accepted agents, the message should not be processed."""
+
+    process_mock = mocker.Mock()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test the accepted agents implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            process_mock(message)
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="main_agent",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="agent/org/main_agent",
+        accepted_agents=["agent1", "agent2", "agent3"],
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you process me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agent4", "agent5", "agent6"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert process_mock.called is False
+
+
+def testProcessMessage_whenAcceptedAgentsNotSet_shouldProcessMessage(
+    agent_run_mock: agent_testing.AgentRunInstance, mocker: plugin.MockerFixture
+) -> None:
+    """When the accepted agents is not set, the message should be processed."""
+
+    process_mock = mocker.Mock()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test that the message is processed when the accepted agents is not set."""
+
+        def process(self, message: agent_message.Message) -> None:
+            process_mock(message)
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="main_agent",
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="agent/org/main_agent",
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you process me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agent4", "agent5", "agent6"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert process_mock.called is True
+
+
+def testProcessMessage_whenAgentSettingsInSelectorsNotSet_shouldUseAgentDefinitionInSelectors(
+    agent_run_mock: agent_testing.AgentRunInstance, mocker: plugin.MockerFixture
+) -> None:
+    """When the agent settings in selectors are not set, the agent definition in selectors should be used."""
+
+    process_mock = mocker.Mock()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test that the agent settings in selectors are used when not set."""
+
+        def process(self, message: agent_message.Message) -> None:
+            process_mock(message)
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="main_agent",
+        in_selectors=["v3.healthcheck.ping", "v3.asset.file"],
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="agent/org/main_agent",
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you process me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agent4", "agent5", "agent6"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert len(test_agent.in_selectors) == 2
+    assert "v3.healthcheck.ping" in test_agent.in_selectors
+    assert "v3.asset.file" in test_agent.in_selectors
+    assert process_mock.called is True
+
+
+def testProcessMessage_whenAgentSettingsInSelectorsSet_shouldUseAgentSettingsInSelectors(
+    agent_run_mock: agent_testing.AgentRunInstance, mocker: plugin.MockerFixture
+) -> None:
+    """When the agent settings in selectors are set, the agent settings in selectors should be used."""
+
+    process_mock = mocker.Mock()
+
+    class TestAgent(agent.Agent):
+        """Helper class to test that the agent settings in selectors are used when set."""
+
+        def process(self, message: agent_message.Message) -> None:
+            process_mock(message)
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="main_agent",
+        in_selectors=["v3.healthcheck.ping", "v3.asset.file"],
+        out_selectors=["v3.report.vulnerability"],
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="agent/org/main_agent",
+        in_selectors=["v3.healthcheck.ping", "v3.asset.file.ios.ipa"],
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+    actual_message = agent_message.Message.from_data(
+        "v3.healthcheck.ping",
+        {
+            "body": "Hello, can you process me?",
+        },
+    )
+    control_message = agent_message.Message.from_data(
+        "v3.control",
+        {
+            "control": {"agents": ["agent4", "agent5", "agent6"]},
+            "message": actual_message.raw,
+        },
+    )
+
+    test_agent.process_message(
+        f"v3.healthcheck.ping.{uuid.uuid4()}", control_message.raw
+    )
+
+    assert len(test_agent.in_selectors) == 2
+    assert "v3.healthcheck.ping" in test_agent.in_selectors
+    assert "v3.asset.file.ios.ipa" in test_agent.in_selectors
+    assert process_mock.called is True
+
+
+def testEmit_whenOutSelectorIsNotExact_emitsMessage(
+    agent_run_mock: agent_testing.AgentRunInstance,
+) -> None:
+    """Test emit when out-selector is the message parent."""
+
+    class TestAgent(agent.Agent):
+        """Helper class to test OpenTelemetry mixin implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            pass
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="some_name", out_selectors=["v3.report"]
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="some_key",
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+
+    test_agent.emit(
+        "v3.report.vulnerability",
+        {
+            "title": "some_title",
+            "technical_detail": "some_detail",
+            "risk_rating": "MEDIUM",
+        },
+    )
+
+    assert len(agent_run_mock.control_messages) > 0
+    assert agent_run_mock.control_messages[0].data["control"]["agents"] == ["some_name"]
+
+
+def testEmit_whenOutSelectorIsNotParent_dontEmitMessage(
+    agent_run_mock: agent_testing.AgentRunInstance,
+) -> None:
+    """Test emit when out-selector is not the message parent."""
+
+    class TestAgent(agent.Agent):
+        """Helper class to test OpenTelemetry mixin implementation."""
+
+        def process(self, message: agent_message.Message) -> None:
+            pass
+
+    agent_definition = agent_definitions.AgentDefinition(
+        name="some_name", out_selectors=["v3.report.vulnerability.xxx"]
+    )
+    agent_settings = runtime_definitions.AgentSettings(
+        key="some_key",
+    )
+    test_agent = TestAgent(
+        agent_definition=agent_definition, agent_settings=agent_settings
+    )
+
+    with pytest.raises(agent.NonListedMessageSelectorError):
+        test_agent.emit(
+            "v3.report.vulnerability",
+            {
+                "title": "some_title",
+                "technical_detail": "some_detail",
+                "risk_rating": "MEDIUM",
+            },
+        )

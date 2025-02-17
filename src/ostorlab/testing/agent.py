@@ -1,4 +1,5 @@
 """mock agent implements the required methods to test the agent's behavior without using external components."""
+
 import dataclasses
 
 import pytest
@@ -99,7 +100,9 @@ def agent_persist_mock(mocker):
         storage[key] = str(value).encode()
 
     def _hash_add(hash_name, mapping):
-        mapping = {k: str(v).encode() for k, v in mapping.items()}
+        for k, v in mapping.items():
+            if isinstance(v, bytes) is False:
+                mapping[k] = str(v).encode()
         storage.setdefault(hash_name, {}).update(mapping)
 
     def _hash_exists(hash_name, key):

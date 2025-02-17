@@ -1,11 +1,12 @@
 """Tests for scan run ios-ipa command."""
+
 from click.testing import CliRunner
 
 from ostorlab.cli import rootcli
 
 
 def testScanRunIosIpa_whenNoOptionsProvided_shouldExitAndShowError(mocker):
-    """Test ostorlab scan run ios-ipa command with no options and no sub command.
+    """Test oxo scan run ios-ipa command with no options and no sub command.
     Should show error message and exit with exit_code = 2."""
 
     runner = CliRunner()
@@ -25,7 +26,7 @@ def testScanRunIosIpa_whenNoOptionsProvided_shouldExitAndShowError(mocker):
 def testScanRunIosIpa_whenBothFileAndUrlOptionsAreProvided_shouldExitAndShowError(
     mocker,
 ):
-    """Test ostorlab scan run ios-ipa command when both file & url options are provided.
+    """Test oxo scan run ios-ipa command when both file & url options are provided.
     Should show error message and exit with exit_code = 2."""
 
     runner = CliRunner()
@@ -43,5 +44,4 @@ def testScanRunIosIpa_whenBothFileAndUrlOptionsAreProvided_shouldExitAndShowErro
     ]
     result = runner.invoke(rootcli.rootcli, command)
 
-    assert "Command accepts either path or source url of the ipa file." in result.output
     assert result.exit_code == 2

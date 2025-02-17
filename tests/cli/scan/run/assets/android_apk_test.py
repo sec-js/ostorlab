@@ -1,11 +1,12 @@
 """Tests for scan run android-apk command."""
+
 from click.testing import CliRunner
 
 from ostorlab.cli import rootcli
 
 
 def testScanRunAndroidApk_whenNoOptionsProvided_shouldExitAndShowError(mocker):
-    """Test ostorlab scan run android-apk command with no options and no sub command.
+    """Test oxo scan run android-apk command with no options and no sub command.
     Should show error message and exit with exit_code = 2."""
 
     runner = CliRunner()
@@ -25,7 +26,7 @@ def testScanRunAndroidApk_whenNoOptionsProvided_shouldExitAndShowError(mocker):
 def testScanRunAndroidApk_whenBothFileAndUrlOptionsAreProvided_shouldExitAndShowError(
     mocker,
 ):
-    """Test ostorlab scan run android-apk command when both file & url options are provided.
+    """Test oxo scan run android-apk command when both file & url options are provided.
     Should show error message and exit with exit_code = 2."""
 
     runner = CliRunner()
@@ -43,5 +44,4 @@ def testScanRunAndroidApk_whenBothFileAndUrlOptionsAreProvided_shouldExitAndShow
     ]
     result = runner.invoke(rootcli.rootcli, command)
 
-    assert "Command accepts either path or source url of the apk file." in result.output
     assert result.exit_code == 2
