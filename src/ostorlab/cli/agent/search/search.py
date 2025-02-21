@@ -1,4 +1,5 @@
 """Agent search command."""
+
 import logging
 from typing import Dict
 
@@ -74,11 +75,11 @@ def search_agents(search: str) -> Dict:
         List of agent matching the search.
 
     Raises:
-        click Exit exception with satus code 2 when API response is invalid.
+        click Exit exception with status code 2 when API response is invalid.
     """
     config_manager = configuration_manager.ConfigurationManager()
 
-    if config_manager.is_authenticated:
+    if config_manager.is_authenticated is True:
         runner = authenticated_runner.AuthenticatedAPIRunner()
     else:
         runner = public_runner.PublicAPIRunner()

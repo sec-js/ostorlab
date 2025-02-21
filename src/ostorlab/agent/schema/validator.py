@@ -1,9 +1,10 @@
 """Validation of Yaml configuration files against json schema files.
 
-    Typical usage example:
-    validator = Validator(json_schema_file_object)
-    validator.validate(yaml_file_object)
+Typical usage example:
+validator = Validator(json_schema_file_object)
+validator.validate(yaml_file_object)
 """
+
 import io
 import json
 
@@ -59,7 +60,7 @@ class Validator:
             jsonschema.validate(instance=yaml_data, schema=self._json_schema)
         except jsonschema.exceptions.ValidationError as e:
             raise ValidationError(
-                f'Validation did not pass: {e.message} for field {".".join(e.schema_path)}.'
+                f"Validation did not pass: {e.message} for field {'.'.join(e.schema_path)}."
             ) from e
         except jsonschema.exceptions.SchemaError as e:
             raise SchemaError("Schema is invalid.") from e

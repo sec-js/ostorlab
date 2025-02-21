@@ -2,6 +2,7 @@
 It invokes the migration engine.
 The lines 11-15, 31 & 86 were manually added.
 """
+
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -10,9 +11,6 @@ from alembic import context
 
 from ostorlab.runtimes.local.models.models import Base
 from ostorlab.runtimes.local.models import models as local_models
-from ostorlab.runtimes.local.models.models import Vulnerability  # pylint: disable=W0611
-from ostorlab.runtimes.local.models.models import Scan  # pylint: disable=W0611
-from ostorlab.runtimes.local.models.models import ScanStatus  # pylint: disable=W0611
 
 
 # this is the Alembic Config object, which provides
@@ -75,7 +73,9 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection, target_metadata=target_metadata, render_as_batch=True
+        )
 
         with context.begin_transaction():
             context.run_migrations()

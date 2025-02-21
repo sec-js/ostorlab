@@ -1,9 +1,13 @@
 """Tests for scan run command."""
+
+import os
 import pathlib
 
 from click.testing import CliRunner
-from ostorlab.cli.ci_scan import run
+from pytest_mock import plugin
+
 from ostorlab.cli import rootcli
+from ostorlab.cli.ci_scan import run
 
 TEST_FILE_PATH = str(pathlib.Path(__file__).parent / "test_file")
 
@@ -293,6 +297,180 @@ def testRunScanCLI_withTestCredentials_callsCreateTestCredentials(mocker):
             TEST_FILE_PATH,
         ],
     )
-
     assert "Created test credentials" in result.output
     assert "Scan created with id 1." in result.output
+    assert "password='pass'" not in result.output
+    assert "************" in result.output
+
+
+def testRunScanCLI_withLogLfavorCircleCi_setExpectedEnvVariable(
+    mocker: plugin.MockerFixture,
+) -> None:
+    """Test ostorlab ci_scan with LogFlavor circleci."""
+    scan_create_dict = {"data": {"createMobileScan": {"scan": {"id": "1"}}}}
+
+    scan_info_dict = {
+        "data": {
+            "scan": {
+                "progress": "done",
+                "riskRating": "high",
+            }
+        }
+    }
+    mocker.patch(
+        "ostorlab.apis.runners.authenticated_runner.AuthenticatedAPIRunner.execute",
+        side_effect=[scan_create_dict, scan_info_dict, scan_info_dict],
+    )
+    mocker.patch.object(run.run, "SLEEP_CHECKS", 1)
+
+    runner = CliRunner()
+    runner.invoke(
+        rootcli.rootcli,
+        [
+            "--api-key=12",
+            "ci-scan",
+            "run",
+            "--scan-profile=full_scan",
+            "--break-on-risk-rating=medium",
+            "--max-wait-minutes=10",
+            "--title=scan1",
+            "--log-flavor=circleci",
+            "ios-ipa",
+            TEST_FILE_PATH,
+        ],
+    )
+
+    assert "SCAN_ID" in os.environ
+    assert os.environ.get("SCAN_ID") == "1"
+
+
+def testRunScanCLI_withsboms_callApi(mocker: plugin.MockerFixture, httpx_mock) -> None:
+    """Test ostorlab ci_scan with LogFlavor circleci."""
+    scan_create_dict = {"data": {"createMobileScan": {"scan": {"id": "1"}}}}
+
+    scan_info_dict = {
+        "data": {
+            "scan": {
+                "progress": "done",
+                "riskRating": "high",
+            }
+        }
+    }
+    api_caller_mock = mocker.patch(
+        "ostorlab.apis.runners.authenticated_runner.AuthenticatedAPIRunner.execute",
+        side_effect=[scan_create_dict, scan_info_dict, scan_info_dict],
+    )
+    mocker.patch.object(run.run, "SLEEP_CHECKS", 1)
+
+    runner = CliRunner()
+    runner.invoke(
+        rootcli.rootcli,
+        [
+            "--api-key=12",
+            "ci-scan",
+            "run",
+            "--scan-profile=full_scan",
+            "--break-on-risk-rating=medium",
+            "--max-wait-minutes=10",
+            "--title=scan1",
+            "--sbom",
+            TEST_FILE_PATH,
+            "--sbom",
+            TEST_FILE_PATH,
+            "android-apk",
+            TEST_FILE_PATH,
+        ],
+    )
+
+    assert api_caller_mock.call_count == 2
+
+
+def testRunWebScanCLI_withsboms_callApi(
+    mocker: plugin.MockerFixture, httpx_mock
+) -> None:
+    """Test ostorlab ci_scan with sbom circleci."""
+    scan_create_dict = {"data": {"createWebScan": {"scan": {"id": "1"}}}}
+
+    scan_info_dict = {
+        "data": {
+            "scan": {
+                "progress": "done",
+                "riskRating": "high",
+            }
+        }
+    }
+    api_caller_mock = mocker.patch(
+        "ostorlab.apis.runners.authenticated_runner.AuthenticatedAPIRunner.execute",
+        side_effect=[scan_create_dict, scan_info_dict, scan_info_dict],
+    )
+    mocker.patch.object(run.run, "SLEEP_CHECKS", 1)
+
+    runner = CliRunner()
+
+    runner.invoke(
+        rootcli.rootcli,
+        [
+            "--api-key=12",
+            "ci-scan",
+            "run",
+            "--scan-profile=full_web_scan",
+            "--break-on-risk-rating=medium",
+            "--max-wait-minutes=10",
+            "--title=scan1",
+            "link",
+            "--url",
+            "https://test1.com",
+        ],
+    )
+
+    assert api_caller_mock.call_count == 2
+    assert hasattr(api_caller_mock.call_args_list[0].args[0], "_scan_source") is False
+
+
+def testRunScanCLI_withSourceGithub_callApi(mocker: plugin.MockerFixture) -> None:
+    """Test ostorlab ci_scan with invalid break_on_risk_rating. it should exit with error exit_code = 2."""
+    scan_create_dict = {"data": {"createMobileScan": {"scan": {"id": "1"}}}}
+
+    scan_info_dict = {
+        "data": {
+            "scan": {
+                "progress": "done",
+                "riskRating": "high",
+            }
+        }
+    }
+
+    api_caller_mock = mocker.patch(
+        "ostorlab.apis.runners.authenticated_runner.AuthenticatedAPIRunner.execute",
+        side_effect=[scan_create_dict, scan_info_dict, scan_info_dict],
+    )
+    mocker.patch.object(run.run, "SLEEP_CHECKS", 1)
+
+    runner = CliRunner()
+    runner.invoke(
+        rootcli.rootcli,
+        [
+            "--api-key=12",
+            "ci-scan",
+            "run",
+            "--scan-profile=full_scan",
+            "--break-on-risk-rating=medium",
+            "--max-wait-minutes=10",
+            "--title=scan1",
+            "--log-flavor=github",
+            "--source=github",
+            "--repository=org/repo",
+            "--pr-number=123456",
+            "--branch=main",
+            "ios-ipa",
+            TEST_FILE_PATH,
+        ],
+    )
+
+    assert api_caller_mock.call_count == 2
+    assert api_caller_mock.call_args_list[0].args[0]._scan_source.source == "github"
+    assert (
+        api_caller_mock.call_args_list[0].args[0]._scan_source.repository == "org/repo"
+    )
+    assert api_caller_mock.call_args_list[0].args[0]._scan_source.pr_number == "123456"
+    assert api_caller_mock.call_args_list[0].args[0]._scan_source.branch == "main"

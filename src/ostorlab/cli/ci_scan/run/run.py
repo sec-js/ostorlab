@@ -3,16 +3,23 @@ Example of usage:
 - ostorlab --api-key='myKey' ci-scan run --scan-profile=full_scan \
            --break-on-risk-rating=medium --title=test_scan [asset] [options].
 """
+
+import io
 import multiprocessing
 import click
 import time
-from typing import List
+from typing import List, Optional
 
 from ostorlab.cli.ci_scan.ci_scan import ci_scan
 from ostorlab.apis import scan_create as scan_create_api
 from ostorlab.apis import scan_info as scan_info_api
 from ostorlab.apis.runners import authenticated_runner
-from ostorlab.cli.ci_scan.run.ci_logger import console_logger, github_logger, logger
+from ostorlab.cli.ci_scan.run.ci_logger import (
+    console_logger,
+    github_logger,
+    circleci_logger,
+    logger,
+)
 from ostorlab.utils import risk_rating
 
 MINUTE = 60
@@ -21,7 +28,11 @@ SLEEP_CHECKS = 10  # seconds
 SCAN_PROGRESS_NOT_STARTED = "not_started"
 SCAN_PROGRESS_DONE = "done"
 
-CI_LOGGER = {"console": console_logger.Logger, "github": github_logger.Logger}
+CI_LOGGER = {
+    "console": console_logger.Logger,
+    "github": github_logger.Logger,
+    "circleci": circleci_logger.Logger,
+}
 
 
 @ci_scan.group()
@@ -79,6 +90,67 @@ CI_LOGGER = {"console": console_logger.Logger, "github": github_logger.Logger}
     required=False,
     multiple=True,
 )
+@click.option(
+    "--sbom",
+    "sboms",
+    help="Path to sbom file.",
+    type=click.File(mode="rb"),
+    required=False,
+    multiple=True,
+    default=[],
+)
+@click.option(
+    "--api-schema",
+    help="Path to api schema file.",
+    type=click.File(mode="rb"),
+    required=False,
+    default=None,
+)
+@click.option(
+    "--filtered-url-regexes",
+    help="List URLs to exclude.",
+    required=False,
+    multiple=True,
+    default=None,
+)
+@click.option(
+    "--proxy",
+    "proxy",
+    help="Proxy to use if defined.",
+    required=False,
+    default=None,
+)
+@click.option(
+    "--qps",
+    "qps",
+    help="Max QPS to use if defined.",
+    required=False,
+    default=None,
+)
+@click.option(
+    "--source",
+    help="CI/CD source.",
+    required=False,
+    default=None,
+)
+@click.option(
+    "--repository",
+    help="Repository name.",
+    required=False,
+    default=None,
+)
+@click.option(
+    "--pr-number",
+    help="Pull request number.",
+    required=False,
+    default=None,
+)
+@click.option(
+    "--branch",
+    help="Branch name.",
+    required=False,
+    default=None,
+)
 @click.pass_context
 def run(
     ctx: click.core.Context,
@@ -93,6 +165,15 @@ def run(
     test_credentials_role: List[str],
     test_credentials_name: List[str],
     test_credentials_value: List[str],
+    sboms: List[io.FileIO],
+    api_schema: io.FileIO,
+    filtered_url_regexes: List[str],
+    proxy: str,
+    qps: int,
+    source: Optional[str] = None,
+    repository: Optional[str] = None,
+    pr_number: Optional[str] = None,
+    branch: Optional[str] = None,
 ) -> None:
     """Start a scan based on a scan profile in the CI.\n"""
 
@@ -106,7 +187,7 @@ def run(
     ci_logger = CI_LOGGER.get(log_flavor)()
 
     if len(test_credentials_login) != len(test_credentials_password):
-        ci_logger.error("Loging and password credentials are not matching count.")
+        ci_logger.error("Login and password credentials are not matching count.")
         raise click.exceptions.Exit(2)
 
     if len(test_credentials_name) != len(test_credentials_value):
@@ -137,6 +218,15 @@ def run(
         "test_credentials_name": test_credentials_name,
         "test_credentials_value": test_credentials_value,
     }
+    ctx.obj["sboms"] = sboms
+    ctx.obj["api_schema"] = api_schema
+    ctx.obj["filtered_url_regexes"] = filtered_url_regexes
+    ctx.obj["proxy"] = proxy
+    ctx.obj["qps"] = qps
+    ctx.obj["source"] = source
+    ctx.obj["repository"] = repository
+    ctx.obj["pr_number"] = pr_number
+    ctx.obj["branch"] = branch
 
 
 def apply_break_scan_risk_rating(
@@ -167,7 +257,7 @@ def apply_break_scan_risk_rating(
     else:
         ci_logger.error(
             f"Incorrect risk rating value {break_on_risk_rating}. "
-            f'It should be one of {", ".join(risk_rating.RiskRating.values())}'
+            f"It should be one of {', '.join(risk_rating.RiskRating.values())}"
         )
         raise click.exceptions.Exit(2)
 

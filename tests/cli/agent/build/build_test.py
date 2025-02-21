@@ -1,6 +1,6 @@
 """Tests for CLI agent build command."""
 
-from pathlib import Path
+import pathlib
 
 import docker
 import pytest
@@ -10,7 +10,7 @@ from ostorlab.cli import rootcli
 
 
 def testAgentBuildCLI_whenRequiredOptionFileIsMissing_showMessage():
-    """Test ostorlab agent build CLI command without the required file option. Should show help message, and confirm
+    """Test oxo agent build CLI command without the required file option. Should show help message, and confirm
     the --file option is missing.
     """
     runner = testing.CliRunner()
@@ -32,9 +32,9 @@ def _is_docker_image_present(image: str):
 
 
 def testAgentBuildCLI_whenParentBuildRootPath_failShowErrorMessage():
-    """Test ostorlab agent build CLI command : Case where the command is valid. The agent container should be built."""
+    """Test oxo agent build CLI command : Case where the command is valid. The agent container should be built."""
     dummy_def_yaml_file_path = (
-        Path(__file__).parent / "assets/illegal_build_root_dummydef.yaml"
+        pathlib.Path(__file__).parent / "assets/illegal_build_root_dummydef.yaml"
     )
     runner = testing.CliRunner()
     result = runner.invoke(
@@ -54,9 +54,9 @@ def testAgentBuildCLI_whenParentBuildRootPath_failShowErrorMessage():
 def testAgentBuildCLI_whenCommandIsValid_buildCompletedAndNoRaiseImageNotFoundExcep(
     image_cleanup,
 ):
-    """Test ostorlab agent build CLI command : Case where the command is valid. The agent container should be built."""
+    """Test oxo agent build CLI command : Case where the command is valid. The agent container should be built."""
     del image_cleanup
-    dummy_def_yaml_file_path = Path(__file__).parent / "assets/dummydef.yaml"
+    dummy_def_yaml_file_path = pathlib.Path(__file__).parent / "assets/dummydef.yaml"
     runner = testing.CliRunner()
     _ = runner.invoke(
         rootcli.rootcli,
@@ -75,9 +75,9 @@ def testAgentBuildCLI_whenCommandIsValid_buildCompletedAndNoRaiseImageNotFoundEx
 def testAgentBuildCLI_whenCommandIsValidAndImageAlreadyExists_showsMessageAndExists(
     image_cleanup,
 ):
-    """Test ostorlab agent build CLI command : Case where the command is valid. The agent container should be built."""
+    """Test oxo agent build CLI command : Case where the command is valid. The agent container should be built."""
     del image_cleanup
-    dummy_def_yaml_file_path = Path(__file__).parent / "assets/dummydef.yaml"
+    dummy_def_yaml_file_path = pathlib.Path(__file__).parent / "assets/dummydef.yaml"
     runner = testing.CliRunner()
     _ = runner.invoke(
         rootcli.rootcli,
@@ -106,11 +106,11 @@ def testAgentBuildCLI_whenCommandIsValidAndImageAlreadyExists_showsMessageAndExi
 def testAgentBuildCLI_whenImageAlreadyExistsAndForceFlagPassed_buildCompletedAndNoRaiseImageNotFoundExcep(
     image_cleanup,
 ):
-    """Test ostorlab agent build CLI command : Case where the command is valid, the image exists and force flag is
+    """Test oxo agent build CLI command : Case where the command is valid, the image exists and force flag is
     passed. The agent container should be built.
     """
     del image_cleanup
-    dummy_def_yaml_file_path = Path(__file__).parent / "assets/dummydef.yaml"
+    dummy_def_yaml_file_path = pathlib.Path(__file__).parent / "assets/dummydef.yaml"
     runner = testing.CliRunner()
     _ = runner.invoke(
         rootcli.rootcli,
@@ -133,3 +133,28 @@ def testAgentBuildCLI_whenImageAlreadyExistsAndForceFlagPassed_buildCompletedAnd
     )
     assert "already exist" not in result.output
     assert result.exit_code == 0
+
+
+def testAgentBuildCLI_whenAgentDefinitionHasInvalidArgType_failShowErrorMessage() -> (
+    None
+):
+    """Test oxo agent build CLI command : Case where the agent definition file has an invalid arg type."""
+    invalid_agent_def = pathlib.Path(__file__).parent / "assets/invalid_agent_def.yaml"
+    runner = testing.CliRunner()
+
+    result = runner.invoke(
+        rootcli.rootcli,
+        [
+            "agent",
+            "build",
+            f"--file={invalid_agent_def}",
+            "--organization=ostorlab",
+        ],
+    )
+
+    assert result.output == (
+        "🔺 ERROR: Definition file does not conform to the provided specification: \n"
+        "Validation did not pass: 'test' is not one of ['string', 'number', "
+        "'boolean', \n"
+        "'array', 'object'] for field properties.args.items.properties.type.enum.\n"
+    )

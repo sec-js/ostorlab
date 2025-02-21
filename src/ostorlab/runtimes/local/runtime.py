@@ -3,24 +3,30 @@
 The local runtime requires Docker Swarm to run robust long-running services with a set of configured services, like
 a local RabbitMQ.
 """
+
 import logging
+import sys
+import threading
+from concurrent import futures
 from typing import Dict, List
 from typing import Optional
-from concurrent import futures
 
 import click
 import docker
 import rich
 import sqlalchemy
 import tenacity
+from docker import errors as docker_errors
 from docker.models import services as docker_models_services
 from rich import markdown
 from rich import panel
 from sqlalchemy import case
 
+from ostorlab.utils import definitions as utils_definitions
 from ostorlab import exceptions
 from ostorlab.assets import asset as base_asset
 from ostorlab.cli import console as cli_console
+from ostorlab.cli import agent_fetcher
 from ostorlab.cli import docker_requirements_checker
 from ostorlab.cli import dumpers
 from ostorlab.cli import install_agent
@@ -29,9 +35,9 @@ from ostorlab.runtimes import runtime
 from ostorlab.runtimes.local import agent_runtime
 from ostorlab.runtimes.local import log_streamer
 from ostorlab.runtimes.local.models import models
+from ostorlab.runtimes.local.services import jaeger
 from ostorlab.runtimes.local.services import mq
 from ostorlab.runtimes.local.services import redis
-from ostorlab.runtimes.local.services import jaeger
 from ostorlab.utils import risk_rating
 from ostorlab.utils import styles
 from ostorlab.utils import volumes
@@ -64,6 +70,10 @@ class AgentNotHealthy(exceptions.OstorlabError):
     """Agent not healthy."""
 
 
+class MissingAgentDefinition(exceptions.OstorlabError):
+    """Agent definition is missing."""
+
+
 def _has_container_image(agent: definitions.AgentSettings):
     """Check if container image is available"""
     return agent.container_image is not None
@@ -90,12 +100,16 @@ class LocalRuntime(runtime.Runtime):
     def __init__(
         self,
         *args,
+        scan_id: Optional[str] = None,
         tracing: Optional[bool] = False,
         mq_exposed_ports: Optional[Dict[int, int]] = None,
+        gcp_logging_credential: Optional[str] = None,
+        run_default_agents: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
         del args, kwargs
+        self._scan_id = scan_id
         self.follow = []
         self._tracing = tracing
         self._mq_service: Optional[mq.LocalRabbitMQ] = None
@@ -104,11 +118,15 @@ class LocalRuntime(runtime.Runtime):
         self._log_streamer = log_streamer.LogStream()
         self._scan_db: Optional[models.Scan] = None
         self._mq_exposed_ports: Optional[Dict[int, int]] = mq_exposed_ports
+        self._gcp_logging_credential = gcp_logging_credential
+        self._run_default_agents: bool = run_default_agents
 
     @property
     def name(self) -> str:
         """Local runtime instance name."""
-        if self._scan_db is not None:
+        if self._scan_id is not None:
+            return self._scan_id
+        elif self._scan_db is not None:
             return str(self._scan_db.id)
         else:
             raise ValueError("Scan not created yet")
@@ -155,12 +173,24 @@ class LocalRuntime(runtime.Runtime):
 
         self._docker_client = docker.from_env()
 
+    def prepare_scan(
+        self, title: str, assets: Optional[List[base_asset.Asset]]
+    ) -> models.Scan:
+        """Prepare scan entry in the database.
+
+        Args:
+            title: Scan title.
+            assets: The target asset to scan.
+        """
+        self._scan_db = self._create_scan_db(title=title)
+        return self._scan_db
+
     def scan(
         self,
         title: str,
         agent_group_definition: definitions.AgentGroupDefinition,
         assets: Optional[List[base_asset.Asset]],
-    ) -> None:
+    ) -> Optional[models.Scan]:
         """Start scan on asset using the provided agent run definition.
 
         The scan takes care of starting all the scan required services, ensuring they are healthy, starting all the
@@ -170,34 +200,32 @@ class LocalRuntime(runtime.Runtime):
             title: Scan title
             agent_group_definition: Agent run definition defines the set of agents and how agents are configured.
             assets: the target asset to scan.
+            timeout: The timeout in seconds for the tracker agent to wait for all agents to finish.
 
         Returns:
-            None
+            The scan object.
         """
         try:
-            console.info("Creating scan entry")
-            if assets is None:
-                assets_str = "N/A"
-            else:
-                assets_str = f'{", ".join([str(asset) for asset in assets])}'
-                # TODO(mohsinenar): we need to add support for storing multiple assets and rename this to target.
-            self._scan_db = self._create_scan_db(asset=assets_str[:255], title=title)
+            if self._scan_db is None:
+                self.prepare_scan(title=title, assets=assets)
             console.info("Creating network")
             self._create_network()
             console.info("Starting services")
             self._start_services()
-            console.info("Checking services are healthy")
-            self._check_services_healthy()
 
-            console.info("Starting pre-agents")
-            self._start_pre_agents()
-            console.info("Checking pre-agents are healthy")
-            is_healthy = self._check_agents_healthy()
-            if is_healthy is False:
-                raise AgentNotHealthy()
+            if self._run_default_agents is True:
+                console.info("Starting pre-agents")
+                self._start_pre_agents()
 
             console.info("Starting agents")
             self._start_agents(agent_group_definition)
+
+            if self._run_default_agents is True:
+                console.info("Starting post-agents")
+                self._start_post_agents()
+
+            console.info("Checking services are healthy")
+            self._check_services_healthy()
             console.info("Checking agents are healthy")
             is_healthy = self._check_agents_healthy()
             if is_healthy is False:
@@ -207,32 +235,49 @@ class LocalRuntime(runtime.Runtime):
                 self._inject_assets(assets)
             console.info("Updating scan status")
             self._update_scan_progress("IN_PROGRESS")
-
-            console.info("Starting post-agents")
-            self._start_post_agents()
-            console.info("Checking post-agents are healthy")
-            is_healthy = self._check_agents_healthy()
-            if is_healthy is False:
-                raise AgentNotHealthy()
-
             console.success("Scan created successfully")
+            scan_complete_thread = threading.Thread(
+                target=self._check_services_running, daemon=False
+            )
+            scan_complete_thread.start()
+            return self._scan_db
         except AgentNotHealthy:
-            console.error("Agent not starting")
-            self.stop(self._scan_db.id)
+            message = "Agent not starting"
             self._update_scan_progress("ERROR")
             self.stop(str(self._scan_db.id))
+            raise AgentNotHealthy(message)
         except AgentNotInstalled as e:
-            console.error(f"Agent {e} not installed")
+            message = f"Agent {e} not installed"
             self.stop(str(self._scan_db.id))
+            raise AgentNotInstalled(message)
         except UnhealthyService as e:
-            console.error(f"Unhealthy service {e}")
+            message = f"Unhealthy service {e}"
             self.stop(str(self._scan_db.id))
+            raise UnhealthyService(message)
         except agent_runtime.MissingAgentDefinitionLabel as e:
-            console.error(
+            message = (
                 f"Missing agent definition {e}. This is probably due to building the image directly with"
-                f" docker instead of `ostorlab agent build` command"
+                f" docker instead of `oxo agent build` command"
             )
             self.stop(str(self._scan_db.id))
+            raise MissingAgentDefinition(message)
+
+    def _check_services_running(self) -> None:
+        """Check if the services are still running."""
+        if len(self.follow) == 0:
+            return
+
+        stop_event = threading.Event()
+        while stop_event.is_set() is False:
+            for service_id in list(self._log_streamer.services):
+                try:
+                    self._docker_client.services.get(service_id)
+                except docker_errors.NotFound:
+                    self._log_streamer.services.remove(service_id)
+            if len(self._log_streamer.services) == 0:
+                console.success("Scan done.")
+                stop_event.set()
+        sys.exit(0)
 
     def stop(self, scan_id: str) -> None:
         """Remove a service (scan) belonging to universe with scan_id(Universe Id).
@@ -257,25 +302,32 @@ class LocalRuntime(runtime.Runtime):
             logger.info(
                 "comparing %s and %s", service_labels.get("ostorlab.universe"), scan_id
             )
-            if service_labels.get("ostorlab.universe") == scan_id:
+            if service_labels.get("ostorlab.universe") is not None and int(
+                service_labels.get("ostorlab.universe")
+            ) == int(scan_id):
                 stopped_services.append(service)
                 service.remove()
 
         networks = self._docker_client.networks.list()
         for network in networks:
             network_labels = network.attrs["Labels"]
-            if (
-                network_labels is not None
-                and network_labels.get("ostorlab.universe") == scan_id
-            ):
-                logger.info("removing network %s", network_labels)
-                stopped_network.append(network)
-                network.remove()
+            if network_labels is None:
+                logger.debug("Skipping network with no labels")
+                continue
+            if isinstance(network_labels, dict):
+                universe = network_labels.get("ostorlab.universe")
+                if universe is not None and int(universe) == scan_id:
+                    logger.info("removing network %s", network_labels)
+                    stopped_network.append(network)
+                    network.remove()
 
         configs = self._docker_client.configs.list()
         for config in configs:
             config_labels = config.attrs["Spec"]["Labels"]
-            if config_labels.get("ostorlab.universe") == scan_id:
+            if (
+                config_labels.get("ostorlab.universe") is not None
+                and config_labels.get("ostorlab.universe") == scan_id
+            ):
                 logger.info("removing config %s", config_labels)
                 stopped_configs.append(config)
                 config.remove()
@@ -292,9 +344,9 @@ class LocalRuntime(runtime.Runtime):
             else:
                 console.info(f"Scan {scan_id} was not found.")
 
-    def _create_scan_db(self, title: str, asset: str):
+    def _create_scan_db(self, title: str):
         """Persist the scan in the database"""
-        return models.Scan.create(title=title, asset=asset)
+        return models.Scan.create(title=title)
 
     def _update_scan_progress(self, progress: str):
         """Update scan status to in progress"""
@@ -352,13 +404,26 @@ class LocalRuntime(runtime.Runtime):
             self._log_streamer.stream(self._jaeger_service.service)
 
     def _check_services_healthy(self):
-        """Check if the rabbitMQ service is running and healthy."""
-        if self._mq_service is None or self._mq_service.is_healthy is False:
+        """Check if the core services are running and healthy."""
+        return self._are_services_ready()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(20),
+        wait=tenacity.wait_fixed(0.5),
+        retry_error_callback=lambda lv: lv.outcome,
+        retry=tenacity.retry_if_result(lambda v: v is False),
+    )
+    def _are_services_ready(self) -> bool:
+        if self._mq_service is None or self._mq_service.is_service_healthy() is False:
             raise UnhealthyService("MQ service is unhealthy.")
-        if self._redis_service is None or self._redis_service.is_healthy is False:
+        if (
+            self._redis_service is None
+            or self._redis_service.is_service_healthy() is False
+        ):
             raise UnhealthyService("Redis service is unhealthy.")
         if self._tracing is True and (
-            self._jaeger_service is None or self._jaeger_service.is_healthy is False
+            self._jaeger_service is None
+            or self._jaeger_service.is_service_healthy() is False
         ):
             raise UnhealthyService("Jaeger service is unhealthy.")
 
@@ -403,25 +468,26 @@ class LocalRuntime(runtime.Runtime):
             raise AgentNotInstalled(agent.key)
 
         runtime_agent = agent_runtime.AgentRuntime(
-            agent,
-            self.name,
-            self._docker_client,
-            self._mq_service,
-            self._redis_service,
-            self._jaeger_service,
+            agent_settings=agent,
+            runtime_name=self.name,
+            docker_client=self._docker_client,
+            mq_service=self._mq_service,
+            redis_service=self._redis_service,
+            jaeger_service=self._jaeger_service,
+            gcp_logging_credential=self._gcp_logging_credential,
         )
         agent_service = runtime_agent.create_agent_service(
-            self.network, extra_configs, extra_mounts
+            network_name=self.network,
+            extra_configs=extra_configs,
+            extra_mounts=extra_mounts,
+            replicas=agent.replicas or 1,
         )
         if agent.key in self.follow:
             self._log_streamer.stream(agent_service)
 
-        if agent.replicas > 1:
-            self._scale_service(agent_service, agent.replicas)
-
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(20),
-        wait=tenacity.wait_exponential(multiplier=1, max=12),
+        wait=tenacity.wait_fixed(0.5),
         # return last value and don't raise RetryError exception.
         retry_error_callback=lambda lv: lv.outcome,
         retry=tenacity.retry_if_result(lambda v: v is False),
@@ -455,7 +521,18 @@ class LocalRuntime(runtime.Runtime):
 
     def _start_tracker_agent(self):
         """Start the tracker agent to handle the scan lifecycle."""
-        tracker_agent_settings = definitions.AgentSettings(key=TRACKER_AGENT_DEFAULT)
+        tracker_agent_settings = definitions.AgentSettings(
+            key=TRACKER_AGENT_DEFAULT,
+        )
+
+        if self.timeout is not None:
+            tracker_agent_settings.args.extend(
+                [
+                    utils_definitions.Arg(
+                        name="scan_done_timeout_sec", type="number", value=self.timeout
+                    ),
+                ]
+            )
         self._start_agent(agent=tracker_agent_settings, extra_configs=[])
 
     def _start_persist_vulnz_agent(self):
@@ -487,15 +564,6 @@ class LocalRuntime(runtime.Runtime):
             ],
         )
 
-    def _scale_service(
-        self, service: docker_models_services.Service, replicas: int
-    ) -> None:
-        """Calling scale directly on the service causes an API error. This is a workaround that simulates refreshing
-        the service object, then calling the scale API."""
-        for s in self._docker_client.services.list():
-            if s.name == service.name:
-                s.scale(replicas)
-
     def list(self, page: int = 1, number_elements: int = 10) -> List[runtime.Scan]:
         """Lists scans managed by runtime.
 
@@ -514,39 +582,41 @@ class LocalRuntime(runtime.Runtime):
             for scan in session.query(models.Scan):
                 scans[scan.id] = runtime.Scan(
                     id=scan.id,
-                    asset=scan.asset,
                     created_time=scan.created_time,
                     progress=scan.progress.value,
+                    risk_rating=scan.risk_rating,
                 )
 
         universe_ids = set()
-        client = docker.from_env()
-        services = client.services.list()
-
-        for s in services:
-            try:
-                service_labels = s.attrs["Spec"]["Labels"]
-                ostorlab_universe_id = service_labels.get("ostorlab.universe")
-                if (
-                    "ostorlab.universe" in service_labels.keys()
-                    and ostorlab_universe_id not in universe_ids
-                ):
-                    universe_ids.add(ostorlab_universe_id)
+        try:
+            client = docker.from_env()
+            services = client.services.list()
+            for s in services:
+                try:
+                    service_labels = s.attrs["Spec"]["Labels"]
+                    ostorlab_universe_id = service_labels.get("ostorlab.universe")
                     if (
-                        ostorlab_universe_id.isnumeric()
-                        and int(ostorlab_universe_id) not in scans
+                        "ostorlab.universe" in service_labels.keys()
+                        and ostorlab_universe_id not in universe_ids
                     ):
-                        console.warning(
-                            f"Scan {ostorlab_universe_id} has not traced in DB."
-                        )
-            except KeyError:
-                logger.warning("The label ostorlab.universe do not exist.")
+                        universe_ids.add(ostorlab_universe_id)
+                        if (
+                            ostorlab_universe_id.isnumeric()
+                            and int(ostorlab_universe_id) not in scans
+                        ):
+                            console.warning(
+                                f"Scan {ostorlab_universe_id} has not traced in DB."
+                            )
+                except KeyError:
+                    logger.warning("The label ostorlab.universe do not exist.")
 
-        return list(scans.values())
+            return list(scans.values())
+        except docker_errors.DockerException as e:
+            console.error(f"Error calling the Docker API: {e}")
 
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(20),
-        wait=tenacity.wait_exponential(multiplier=1, max=20),
+        wait=tenacity.wait_fixed(0.5),
         # return last value and don't raise RetryError exception.
         retry_error_callback=lambda lv: lv.outcome,
         retry=tenacity.retry_if_result(lambda v: v is False),
@@ -567,24 +637,64 @@ class LocalRuntime(runtime.Runtime):
                         return False
         return True
 
-    def install(self) -> None:
+    def install(self, docker_client: Optional[docker.DockerClient] = None) -> None:
         """Installs the default agents.
+
+        Args:
+            docker_client: optional instance of the docker client to use to install the agent.
 
         Returns:
             None
         """
         for agent_key in DEFAULT_AGENTS:
-            install_agent.install(agent_key=agent_key)
+            try:
+                install_agent.install(agent_key=agent_key, docker_client=docker_client)
+            except agent_fetcher.AgentDetailsNotFound:
+                console.warning(f"agent {agent_key} not found on the store")
 
-    def list_vulnz(self, scan_id: int):
+    def list_vulnz(
+        self,
+        scan_id: int,
+        filter_risk_rating: Optional[List[str]] = None,
+        search: Optional[str] = None,
+        order_by: str = "risk_rating",
+    ) -> None:
         try:
             with models.Database() as session:
-                vulnerabilities = (
-                    session.query(models.Vulnerability)
-                    .filter_by(scan_id=scan_id)
-                    .order_by(models.Vulnerability.title)
-                    .all()
-                )
+                query = session.query(models.Vulnerability).filter_by(scan_id=scan_id)
+                if filter_risk_rating is not None:
+                    filter_risk_rating = [r.upper() for r in filter_risk_rating]
+                    query = query.filter(
+                        models.Vulnerability.risk_rating.in_(filter_risk_rating)
+                    )
+
+                if search is not None:
+                    query = query.filter(
+                        sqlalchemy.or_(
+                            models.Vulnerability.title.ilike(f"%{search}%"),
+                            models.Vulnerability.short_description.ilike(f"%{search}%"),
+                            models.Vulnerability.description.ilike(f"%{search}%"),
+                            models.Vulnerability.recommendation.ilike(f"%{search}%"),
+                            models.Vulnerability.technical_detail.ilike(f"%{search}%"),
+                        )
+                    )
+
+                if order_by == "risk_rating":
+                    case_ordering = case(
+                        [
+                            (models.Vulnerability.risk_rating == rating, order)
+                            for rating, order in risk_rating.RATINGS_ORDER.items()
+                        ],
+                        else_=len(risk_rating.RATINGS_ORDER),
+                    )
+                    vulnerabilities = query.order_by(
+                        case_ordering, models.Vulnerability.title
+                    ).all()
+                elif order_by == "title":
+                    vulnerabilities = query.order_by(models.Vulnerability.title).all()
+                elif order_by == "id":
+                    vulnerabilities = query.order_by(models.Vulnerability.id).all()
+
             vulnz_list = []
             for vulnerability in vulnerabilities:
                 vulnerability_location = vulnerability.location or ""
@@ -724,3 +834,34 @@ class LocalRuntime(runtime.Runtime):
         console.success(
             f"{len(vulnerabilities)} Vulnerabilities saved to  : {dumper.output_path}"
         )
+
+    def link_agent_group_scan(
+        self,
+        scan: models.Scan,
+        agent_group_definition: definitions.AgentGroupDefinition,
+    ) -> None:
+        """Link the agent group to the scan in the database.
+
+        Args:
+            scan: The scan object.
+            agent_group_definition: The agent group definition.
+        """
+        with models.Database() as session:
+            agent_group_db = models.AgentGroup.create_from_agent_group_definition(
+                agent_group_definition
+            )
+            scan.agent_group_id = agent_group_db.id
+            session.add(scan)
+            session.commit()
+
+    def link_assets_scan(
+        self, scan_id: int, assets: Optional[List[base_asset.Asset]] = None
+    ) -> None:
+        """Link the assets to the scan in the database.
+
+        Args:
+            scan_id: The scan id.
+            assets: The list of assets.
+        """
+        if assets is not None:
+            models.Asset.create_from_assets_definition(scan_id=scan_id, assets=assets)

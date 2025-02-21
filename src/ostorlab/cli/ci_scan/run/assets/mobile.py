@@ -1,11 +1,12 @@
 """Common logic for Mobile Assets of type .APK package file AAB package file and IPA .
 This module takes care of preparing the application file and calling the create mobile scan API.
 """
+
 import io
 import click
 import itertools
 
-from typing import List
+from typing import List, Optional
 
 from ostorlab.cli.ci_scan.run import run
 from ostorlab.apis.runners import authenticated_runner
@@ -61,6 +62,11 @@ def run_mobile_scan(
         title = ctx.obj["title"]
         break_on_risk_rating = ctx.obj["break_on_risk_rating"]
         max_wait_minutes = ctx.obj["max_wait_minutes"]
+        sboms = ctx.obj["sboms"]
+        repository = ctx.obj["repository"]
+        source = ctx.obj["source"]
+        pr_number = ctx.obj["pr_number"]
+        branch = ctx.obj["branch"]
         runner = authenticated_runner.AuthenticatedAPIRunner(
             api_key=ctx.obj.get("api_key")
         )
@@ -69,7 +75,7 @@ def run_mobile_scan(
             if test_credentials:
                 credential_ids = _create_test_credentials(test_credentials, runner)
                 ci_logger.info(
-                    f'Created test credentials {", ".join(str(t) for t in test_credentials)} successfully'
+                    f"Created test credentials {', '.join(str(t) for t in test_credentials)} successfully"
                 )
             else:
                 credential_ids = []
@@ -77,8 +83,24 @@ def run_mobile_scan(
             ci_logger.info(
                 f"creating scan `{title}` with profile `{scan_profile}` for `{asset_type}`"
             )
+            scan_source = None
+            if source is not None:
+                scan_source = scan_create_api.ScanSource(
+                    source=source,
+                    repository=repository,
+                    pr_number=pr_number,
+                    branch=branch,
+                )
+
             scan_id = _create_scan(
-                title, scan_profile, asset_type, file, credential_ids, runner
+                title,
+                scan_profile,
+                asset_type,
+                file,
+                credential_ids,
+                runner,
+                sboms,
+                scan_source,
             )
 
             ci_logger.output(name="scan_id", value=scan_id)
@@ -100,7 +122,16 @@ def run_mobile_scan(
         raise click.exceptions.Exit(2) from None
 
 
-def _create_scan(title, scan_profile, asset_type, file, credential_ids, runner):
+def _create_scan(
+    title: str,
+    scan_profile: str,
+    asset_type: scan_create_api.MobileAssetType,
+    file: io.FileIO,
+    credential_ids: List[int],
+    runner: authenticated_runner.AuthenticatedAPIRunner,
+    sboms: List[io.FileIO],
+    scan_source: Optional[scan_create_api.ScanSource] = None,
+) -> int:
     scan_result = runner.execute(
         scan_create_api.CreateMobileScanAPIRequest(
             title=title,
@@ -108,6 +139,8 @@ def _create_scan(title, scan_profile, asset_type, file, credential_ids, runner):
             scan_profile=scan_profile,
             application=file,
             test_credential_ids=credential_ids,
+            sboms=sboms,
+            scan_source=scan_source,
         )
     )
     scan_id = scan_result.get("data").get("createMobileScan").get("scan").get("id")

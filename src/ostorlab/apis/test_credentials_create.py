@@ -1,4 +1,5 @@
 """Create test credentials API."""
+
 import abc
 import dataclasses
 import json
@@ -18,7 +19,7 @@ class TestCredential(abc.ABC):
 
 @dataclasses.dataclass
 class TestCredentialLogin(TestCredential):
-    """Loging password test credentials with optional role and url fields."""
+    """Login password test credentials with optional role and url fields."""
 
     login: str
     password: str
@@ -37,6 +38,9 @@ class TestCredentialLogin(TestCredential):
                 }
             }
         }
+
+    def __repr__(self) -> str:
+        return f"login: {self.login}, password: ************, role: {self.role}, url: {self.url}"
 
 
 @dataclasses.dataclass

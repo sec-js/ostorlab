@@ -5,9 +5,12 @@ Usage
                  bus_username, bus_password)
     agent_service = agent_runtime.create_agent_service(network_name, extra_configs)
 """
+
+import base64
 import hashlib
 import io
 import logging
+import random
 import uuid
 from typing import List, Optional
 
@@ -28,10 +31,12 @@ MOUNT_VARIABLES = {"$CONFIG_HOME": str(configuration_manager.OSTORLAB_PRIVATE_DI
 HEALTHCHECK_HOST = "0.0.0.0"
 HEALTHCHECK_PORT = 5000
 SECOND = 1000000000
-HEALTHCHECK_RETRIES = 5
-HEALTHCHECK_TIMEOUT = 10 * SECOND
+HEALTHCHECK_RETRIES = 10
+HEALTHCHECK_TIMEOUT = 30 * SECOND
 HEALTHCHECK_START_PERIOD = 2 * SECOND
-HEALTHCHECK_INTERVAL = 30 * SECOND
+HEALTHCHECK_INTERVAL = 60 * SECOND
+MAX_SERVICE_NAME_LEN = 63
+MAX_RANDOM_NAME_LEN = 5
 
 
 class Error(exceptions.OstorlabError):
@@ -146,6 +151,7 @@ class AgentRuntime:
         bus_exchange_topic: str,
         redis_url: str,
         tracing_collector_url: str,
+        gcp_logging_credential: Optional[str] = None,
     ) -> None:
         """Prepare all the necessary attributes for the agent runtime.
 
@@ -160,6 +166,7 @@ class AgentRuntime:
             redis_url: Redis URL.
             tracing_collector_url: Tracing Collector supporting Open Telemetry URL. The URL is a custom format to pass
              exporter and its arguments.
+            gcp_logging_credential: GCP Logging JSON credentials.
         """
         self._uuid = uuid.uuid4()
         self._docker_client = docker_client
@@ -172,6 +179,7 @@ class AgentRuntime:
         self.bus_exchange_topic = bus_exchange_topic
         self.redis_url = redis_url
         self.tracing_collector_url = tracing_collector_url
+        self._gcp_logging_credential = gcp_logging_credential
         self.update_agent_settings()
 
     def create_settings_config(self) -> docker.types.ConfigReference:
@@ -210,7 +218,7 @@ class AgentRuntime:
         """Create a docker configuration of the  agent definition.
 
         Returns:
-            docker configuration reference of the agent defintion configuration.
+            docker configuration reference of the agent definition configuration.
         """
         agent_definition = self._docker_client.images.get(
             self.agent.container_image
@@ -302,10 +310,13 @@ class AgentRuntime:
         network_name: str,
         extra_configs: Optional[List[docker.types.ConfigReference]] = None,
         extra_mounts: Optional[List[docker.types.Mount]] = None,
+        replicas: int = 1,
     ) -> docker.models.services.Service:
         """Create the docker agent service with proper configs and policies.
 
         Args:
+            replicas: number of replicas for the service.
+            extra_mounts: list of docker Mounts that will be exposed to the service.
             network_name: network name to attach the service to.
             extra_configs: list of docker ConfigReferences that will be exposed to the service.
 
@@ -334,22 +345,34 @@ class AgentRuntime:
 
         constraints = self.agent.constraints or agent_definition.constraints
         mem_limit = self.agent.mem_limit or agent_definition.mem_limit
-        restart_policy = self.agent.restart_policy or agent_definition.restart_policy
+        restart_policy = (
+            self.agent.restart_policy or agent_definition.restart_policy or "any"
+        )
         caps = self.agent.caps or agent_definition.caps
 
         service_name = (
             agent_definition.service_name
-            or self.agent.container_image.replace(":", "_").replace(".", "")
+            or self.agent.container_image.split(":")[0].replace(".", "")
             + "_"
             + self.runtime_name
         )
 
+        # We apply the random str only if it will not break the max docker service name characters (63)
+        if len(service_name) + MAX_RANDOM_NAME_LEN < MAX_SERVICE_NAME_LEN:
+            service_name = service_name + "_" + str(random.randrange(0, 9999))
+
+        env = [
+            f"UNIVERSE={self.runtime_name}",
+        ]
+        if self._gcp_logging_credential is not None:
+            env.append(
+                f"GCP_LOGGING_CREDENTIAL={base64.b64encode(self._gcp_logging_credential.encode()).decode()}"
+            )
+
         agent_service = self._docker_client.services.create(
             image=self.agent.container_image,
             networks=[network_name],
-            env=[
-                f"UNIVERSE={self.runtime_name}",
-            ],
+            env=env,
             name=service_name,
             restart_policy=docker_types_services.RestartPolicy(
                 condition=restart_policy
@@ -362,6 +385,7 @@ class AgentRuntime:
             endpoint_spec=endpoint_spec,
             resources=docker_types_services.Resources(mem_limit=mem_limit),
             cap_add=caps,
+            mode=docker_types_services.ServiceMode("replicated", replicas),
         )
 
         return agent_service

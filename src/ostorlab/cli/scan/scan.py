@@ -97,9 +97,9 @@ def scan(
     """Use scan [subcommand] to list, start or stop a scan.\n
     Examples:\n
         - To show list of scans:\n
-        ostorlab scan list\n
+        oxo scan list\n
         - To stop a scan:\n
-        ostorlab scan stop <scan-id>\n
+        oxo scan stop <scan-id>\n
     """
     try:
         if mq_exposed_ports is not None:
@@ -120,6 +120,7 @@ def scan(
             tracing=tracing,
             tracing_collector_url=tracing_collector_url,
             mq_exposed_ports=mq_exposed_ports,
+            gcp_logging_credential=ctx.obj.get("gcp_logging_credential"),
         )
         ctx.obj["runtime"] = runtime_instance
     except registry.RuntimeNotFoundError as e:

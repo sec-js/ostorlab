@@ -2,8 +2,10 @@
 
 import asyncio
 from unittest import mock
+import concurrent.futures
 
 import pytest
+from pytest_mock import plugin
 
 from ostorlab.agent.mixins import agent_mq_mixin
 from ostorlab.utils import strings
@@ -12,20 +14,23 @@ from ostorlab.utils import strings
 class Agent(agent_mq_mixin.AgentMQMixin):
     """Helper class to test MQ implementation of send and process messages."""
 
-    def __init__(self, name="test1", keys=("a.#",)):
-        url = "amqp://guest:guest@localhost:5672/"
+    def __init__(
+        self, name="test1", keys=("a.#",), url="amqp://guest:guest@localhost:5672/"
+    ):
         topic = "test_topic"
         super().__init__(name=name, keys=keys, url=url, topic=topic)
         self.stub = None
 
     def process_message(self, selector, message):
-        """Process the MQ messages using stub callback for the unittests."""
+        """Process the MQ messages using stub callback for the Unit tests."""
         if self.stub is not None:
             self.stub(message)
 
     @classmethod
-    def create(cls, stub, name="test1", keys=("a.#",)):
-        instance = cls(name=name, keys=keys)
+    def create(
+        cls, stub, name="test1", keys=("a.#",), url="amqp://guest:guest@localhost:5672/"
+    ):
+        instance = cls(name=name, keys=keys, url=url)
         instance.stub = stub
         return instance
 
@@ -42,6 +47,22 @@ async def testClient_whenMessageIsSent_processMessageIsCalled(mocker, mq_service
     await asyncio.sleep(1)
     stub.assert_called_with(word)
     assert stub.call_count == 1
+
+
+@pytest.mark.asyncio
+async def testConnection_whenConnectionException_reconnectIsCalled(mocker):
+    stub = mocker.stub(name="test1")
+    client = Agent.create(
+        stub, name="test1", keys=["d.#"], url="amqp://wrong:wrong@localhost:5672/"
+    )
+    task = asyncio.create_task(client.mq_init())
+
+    try:
+        await asyncio.wait_for(task, timeout=10)
+    except asyncio.TimeoutError:
+        pass
+
+    assert task.done() is True
 
 
 @pytest.mark.skip(reason="Needs debugging why MQ is not resending the message")
@@ -107,3 +128,40 @@ async def testClient_whenClientDisconnects_messageIsNotLost(mocker, mq_service):
     # make sure the message is received and was not deleted
     stub.assert_called_with(word)
     assert stub.call_count == 1
+
+
+def testMqSendMessage_onConnectionResetError_shouldRetriesAndReraise(
+    mocker,
+):
+    mock_send_message = mocker.patch.object(agent_mq_mixin.AgentMQMixin, "_get_channel")
+    mock_send_message.side_effect = ConnectionResetError
+    agent = agent_mq_mixin.AgentMQMixin(
+        name="test",
+        keys=["a.#"],
+        url="amqp://guest:guest@localhost:5672/",
+        topic="test_topic",
+    )
+
+    with pytest.raises(ConnectionResetError):
+        agent.mq_send_message(key="a.1.2", message=b"test message")
+
+    assert mock_send_message.call_count == 6
+
+
+def testMqSendMessage_onCanceledError_shouldRetryAndReraise(
+    mocker: plugin.MockerFixture,
+) -> None:
+    """Test that the message is retried when a CancelledError is raised."""
+    mock_send_message = mocker.patch.object(agent_mq_mixin.AgentMQMixin, "_get_channel")
+    mock_send_message.side_effect = concurrent.futures.CancelledError
+    agent = agent_mq_mixin.AgentMQMixin(
+        name="test",
+        keys=["a.#"],
+        url="amqp://guest:guest@localhost:5672/",
+        topic="test_topic",
+    )
+
+    with pytest.raises(concurrent.futures.CancelledError):
+        agent.mq_send_message(key="a.1.2", message=b"test message")
+
+    assert mock_send_message.call_count == 6

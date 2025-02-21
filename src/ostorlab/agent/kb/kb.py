@@ -1,9 +1,10 @@
 """KB provides automatic mapping from the KB entry folder name to the meta content."""
+
 import dataclasses
 import json
 import pathlib
 
-from typing import Dict
+from typing import Dict, Optional, Union
 
 KB_FOLDER = "KB"
 META_JSON = "meta.json"
@@ -28,6 +29,8 @@ class Entry:
     targeted_by_ransomware: bool = False
     targeted_by_nation_state: bool = False
     cvss_v3_vector: str = ""
+    cvss_v4_vector: str = ""
+    category_groups: Optional[list[dict[str, Union[str, list[str]]]]] = None
 
 
 class MetaKB(type):
@@ -41,12 +44,17 @@ class MetaKB(type):
         entry_path = paths[0]
         if not (entry_path / META_JSON).exists():
             raise ValueError(f"{entry_path} does not have a mapping.")
-        with (entry_path / META_JSON).open(encoding="utf-8") as f, (
-            entry_path / DESCRIPTION
-        ).open(encoding="utf-8") as d, (entry_path / RECOMMENDATION).open(
-            encoding="utf-8"
-        ) as r:
+        with (
+            (entry_path / META_JSON).open(encoding="utf-8") as f,
+            (entry_path / DESCRIPTION).open(encoding="utf-8") as d,
+            (entry_path / RECOMMENDATION).open(encoding="utf-8") as r,
+        ):
             meta = json.loads(f.read())
+            categories = meta.get("categories", {})
+            category_groups = [
+                {"key": k, "categories": v} for k, v in categories.items()
+            ]
+
             return Entry(
                 title=meta.get("title"),
                 risk_rating=meta.get("risk_rating"),
@@ -61,6 +69,8 @@ class MetaKB(type):
                 targeted_by_ransomware=meta.get("targeted_by_ransomware", False),
                 targeted_by_nation_state=meta.get("targeted_by_nation_state", False),
                 cvss_v3_vector=meta.get("cvss_v3_vector", ""),
+                cvss_v4_vector=meta.get("cvss_v4_vector", ""),
+                category_groups=category_groups,
             )
 
 
